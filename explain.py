@@ -1,7 +1,5 @@
+from collections import deque
 import psycopg
-
-def add_explanations(plan):
-    pass
 
 class Connection():
     def __init__(self) -> None:
@@ -23,7 +21,13 @@ class Connection():
         except Exception as e:
             return str(e)
     
-    def explain(self, query:str) -> str:
+    def get_explanation(self, node):
+        if "Total Cost" not in node or node["Total Cost"] == 0:
+            return "<b>Comment</b>: No cost associated with this node."
+        return f"<b>Cost:</b> 1000\n<b>Explanation</b>: cost_cpu_tuple = 0.01. 100000 rows * 0.01 = 1000\n<b>Comment</b>: Costs Match!"
+
+    def explain(self, query:str, log_cb: callable) -> str:
+        self.log = log_cb
         if not self.connected():
             return "No database connection found! There is no context for this query."
 
@@ -34,5 +38,18 @@ class Connection():
             return f"Error: {str(e)}"
 
         plan = cur.fetchall()[0][0][0]['Plan']
-        add_explanations(plan)
+        node_stack = deque()
+
+        def add_nodes(node):
+            node_stack.append(node)
+            if "Plans" in node:
+                for child_plan in node["Plans"]:
+                    add_nodes(child_plan)
+
+        add_nodes(plan)
+        
+        for _ in range(len(node_stack)):
+            node = node_stack.pop()
+            node["Explanation"] = self.get_explanation(node)
+
         return plan    

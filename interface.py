@@ -134,6 +134,7 @@ class Visualizer():
 
         self.node_id = 0
         self.imagemap = {}
+        self.explainmap = {}
         self.add_nodes_and_edges(graph, plan, 0)
 
         pos = nx.multipartite_layout(graph)
@@ -152,7 +153,7 @@ class Visualizer():
                 }
             }
             img = f"img/{self.imagemap[node[0]]}"
-            net.add_node(node[0], label=node[1], explanation=f"Cost Explanation for {node[1]}\nPostgres says 1000. This is because cost_cpu_tuple = 0.01. 100000 rows * 0.01 = 1000", x = pos[node[0]][0] * 1000, y = pos[node[0]][1] * 1000, shape="circularImage", image=img, borderWidth = 1.5, borderWidthSelected = 2, color=color, size=25)
+            net.add_node(node[0], label=node[1], explanation=self.explainmap[node[0]], x = pos[node[0]][0] * 1000, y = pos[node[0]][1] * 1000, shape="circularImage", image=img, borderWidth = 1.5, borderWidthSelected = 2, color=color, size=25)
         
         for edge in graph.edges:
             net.add_edge(edge[0], edge[1], color="black", width = 2, chosen=False, arrowStrikethrough=False)
@@ -178,6 +179,7 @@ class Visualizer():
                 img = ImageMapper[label]["image"]
                 label = ImageMapper[label]["image_text"]
         self.imagemap[self.node_id] = img
+        self.explainmap[self.node_id] = plan["Explanation"]
 
         graph.add_node(self.node_id, subset=subset, label=label)
         if parent:
@@ -209,26 +211,26 @@ class Visualizer():
 
         return '\n'.join(html)
 
-def set_window_size(frame: ttk.Frame, size: tuple) -> None:
+def set_window_size(frame: ttk.Frame, size: tuple, refresh: bool = False) -> None:
     root:Tk = frame.master
     width, height = size
     screenwidth = root.winfo_screenwidth()
     screenheight = root.winfo_screenheight()
     alignstr = '%dx%d+%d+%d' % (width, height, (screenwidth - width) / 2, (screenheight - height) / 2)
     root.geometry(alignstr)
-    dark_title_bar(root)
+    dark_title_bar(root, refresh)
 
-def dark_title_bar(window: Tk) -> None:
+def dark_title_bar(window: Tk, refresh: bool) -> None:
     if platform.system() == "Windows":
         from ctypes import windll, c_int, byref, sizeof
         window.update()
         set_window_attribute = windll.dwmapi.DwmSetWindowAttribute
         get_parent = windll.user32.GetParent
         hwnd = get_parent(window.winfo_id())
-        set_window_attribute(hwnd, 20, byref(c_int(2)), sizeof(c_int))
+        set_window_attribute(hwnd, 19, byref(c_int(2)), sizeof(c_int))
 
-        # TODO: check if needed once or every time on Lab Win10 (2019 version)
-        if platform.release() == "10":
+        if platform.release() == "10" and refresh:
+            refresh = False
             window.withdraw()
             window.deiconify()
  
@@ -309,6 +311,7 @@ class App():
 
         root.grid_columnconfigure(0, weight=1)
         root.grid_columnconfigure(1, weight=1)
+        root.grid_rowconfigure(1, weight=1)
 
         header_label = ttk.Label(root, justify="left", text="Enter one query at a time and click 'Explain' to generate an explanation. This will launch an interactable graph in your browser", wraplength=450)
         disconnect_btn = ttk.Button(root, text="Disconnect", command=self.disconnect_btn_command)
@@ -330,6 +333,12 @@ class App():
         self.explain_status.delete(1.0,"end")
         self.explain_status.insert("end", status)
         self.explain_status["state"] = "disabled"
+    
+    def add_status(self, status) -> None:
+        self.explain_status["state"] = "normal"
+        self.explain_status.insert("end", "\n" + status)
+        self.explain_status.yview_moveto(1.0)
+        self.explain_status["state"] = "disabled"
 
     def disconnect_btn_command(self) -> None:
         self.set_status("")
@@ -340,9 +349,10 @@ class App():
         self.login_frame.tkraise()
     
     def explain_btn_command(self) -> None:
-        explain_res = CONN.explain(query=self.explain_input.get("1.0",'end-1c'))
+        self.set_status("")
+        explain_res = CONN.explain(query=self.explain_input.get("1.0",'end-1c'), log_cb=self.set_status)
         if type(explain_res) == str:
             self.set_status(status=explain_res)
         else:
-            self.set_status("Plan generated successfully! Adding explanations now.")
+            self.add_status("Plan generated successfully! Adding explanations now.")
             VIZ.new_viz(plan=explain_res)

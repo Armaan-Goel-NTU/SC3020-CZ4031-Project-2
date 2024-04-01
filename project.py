@@ -18,7 +18,7 @@ app_frame.grid(row=0, column=0, sticky="nsew")
 login = interface.Login(login_frame, app_frame)
 app = interface.App(app_frame, login_frame)
 
-interface.set_window_size(login_frame, interface.LOGIN_SIZE)
+interface.set_window_size(login_frame, interface.LOGIN_SIZE, True)
 login_frame.tkraise()
 
 sv_ttk.set_theme("dark")
