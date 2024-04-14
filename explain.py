@@ -38,11 +38,34 @@ def explain_seqscan(node: dict) -> str:
 
     return (cost, explanation)
 
+def explain_append(node: dict) -> str:
+    # gather child costs
+    cpu_tuple_cost = float(cache.get_setting("cpu_tuple_cost"))
+    child_costs = [child["Total Cost"] for child in node.get("Plans", [])]
+    child_startup_costs = [child["Startup Cost"] for child in node.get("Plans", [])]
+    row_count = node["Plan Rows"]
+
+    if not child_costs: 
+        return (0, "No child plans for this Append node.")
+
+    min_startup_cost = min(child_startup_costs)
+    total_cost = sum(child_costs) + cpu_tuple_cost * row_count * 0.5  # 0.5 is APPEND_CPU_COST_MULTIPLIER
+    total_cost=round(total_cost, 1)   #check issue with decimal without round
+
+    #explanation:
+    explanation = f"Append node combines several plans. The startup cost is the minimum of the startup costs of its children, and the total cost includes CPU costs associated with processing rows.\n"
+    explanation += f"Child startup costs: {child_startup_costs}\n"
+    explanation += f"Child total costs: {child_costs}\n"
+    explanation += f"Estimated row count: {row_count}\n"
+    explanation += f"Minimum startup cost: {min_startup_cost}, Adjusted total cost: {total_cost} (including CPU cost for handling rows)"
+
+    return (total_cost, explanation)
+    
 fn_dict = {
     "Result": None,
     "ProjectSet": None,
     "ModifyTable": None,
-    "Append": None,
+    "Append": explain_append,
     "Merge Append": None,
     "Recursive Union": None,
     "BitmapAnd": None,
