@@ -60,7 +60,41 @@ def explain_append(node: dict) -> str:
     explanation += f"Minimum startup cost: {min_startup_cost}, Adjusted total cost: {total_cost} (including CPU cost for handling rows)"
 
     return (total_cost, explanation)
-    
+
+def explain_gather(node: dict) -> str:
+
+    parallel_setup_cost = float(cache.get_setting("parallel_setup_cost"))
+    parallel_tuple_cost = float(cache.get_setting("parallel_tuple_cost"))
+
+    if 'Plans' not in node or not node['Plans']:
+        return (0, "No child plans for this Gather node.")
+
+    subpath = node['Plans'][0]  # Assuming the first plan is the subpath
+
+    rows = node["Plan Rows"]
+
+    # Extract costs from the subpath
+    subpath_startup_cost = subpath['Startup Cost']
+    subpath_total_cost = subpath['Total Cost']
+    subpath_run_cost = subpath_total_cost - subpath_startup_cost
+
+    # incorporating parallel costs
+    startup_cost = subpath_startup_cost + parallel_setup_cost
+    run_cost = subpath_run_cost + parallel_tuple_cost * rows
+
+    total_cost = startup_cost + run_cost
+
+    # explanation:
+    explanation = f"Gather node coordinates parallel execution. It has startup and run phases:\n"
+    explanation += f"Subpath startup cost: {subpath_startup_cost}\n"
+    explanation += f"Subpath run cost (excluding startup): {subpath_run_cost}\n"
+    explanation += f"Parallel setup cost: {parallel_setup_cost}\n"
+    explanation += f"Parallel tuple cost per row: {parallel_tuple_cost}, for {rows} rows\n"
+    explanation += f"Total Gather node cost: {total_cost} (including parallel overhead)"
+
+    return (total_cost, explanation)
+
+
 fn_dict = {
     "Result": None,
     "ProjectSet": None,
@@ -75,7 +109,7 @@ fn_dict = {
     "Hash Join": None,
     "Seq Scan": explain_seqscan,
     "Sample Scan": None,
-    "Gather": None,
+    "Gather": explain_gather,
     "Gather Merge": None,
     "Index Scan": None,
     "Index Only Scan": None,
