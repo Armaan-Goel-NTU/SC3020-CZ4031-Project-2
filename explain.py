@@ -386,6 +386,27 @@ def explain_bitmap_and(node: dict) -> str:
     
     return (cost, explanation)
 
+def explain_group(node: dict) -> str:
+    cpu_operator_cost = float(cache.get_setting("cpu_operator_cost"))
+    numGroupCols = len(node["Group Key"])
+    input_tuples = node["Plans"][0]["Plan Rows"]
+    total_cost = cpu_operator_cost * input_tuples * numGroupCols
+
+    explanation = f"The startup cost for a group operator is the same as its child\n"
+    explanation = f"cpu_operator_cost ({cpu_operator_cost}) is incurred for every input tuple ({input_tuples}) and grouping clause ({numGroupCols}) combination\n"
+
+    if "Filter" in node:
+        pattern = r"\([^()]*\)"
+        filters = len(re.findall(pattern, node["Filter"]))
+        cpu_operator_cost = float(cache.get_setting("cpu_operator_cost"))
+        filter_cost = filters * cpu_operator_cost
+        explanation += f"CPU cost per output tuple is increased by {filter_cost:.4f} for {filters} filters * cpu_operator_cost ({cpu_operator_cost})\n"
+        total_cost += filter_cost * node["Plan Rows"]
+
+    explanation += f"The additional cost comes out to be {total_cost:.2f}"
+
+    return (total_cost + node["Plans"][0]["Total Cost"], explanation)
+
 fn_dict = {
     "Result": explain_result,
     "ProjectSet": None,
@@ -421,7 +442,7 @@ fn_dict = {
     "Memoize": None,
     "Sort": explain_sort,
     "Incremental Sort": None,
-    "Group": None,
+    "Group": explain_group,
     "Aggregate": None,
     "WindowAgg": None,
     "Unique": None,
