@@ -230,6 +230,26 @@ def explain_indexscan(node: dict) -> str:
     
     return (cost, explanation)
 
+def explain_result(node: dict) -> str:
+    expected_cost = node["Total Cost"]
+    tuples = node["Plan Rows"]
+    comment = ""
+    if "Plans" in node:
+        cost = node["Plans"][0]["Total Cost"]
+        explanation = "Result usually has additional no cost associated with it."
+        if expected_cost > cost:
+            comment = f"Perhaps there is a filtering cost of {(expected_cost - cost) / tuples} being applied per tuple. There are {tuples} tuple(s)"
+        return (cost, explanation, comment)
+    else:
+        if expected_cost == 0:
+            return (0, "Result usually has additional no cost associated with it.")
+        cpu_tuple_cost = cache.get_setting("cpu_tuple_cost")
+        explanation = f"Result incurs cpu_tuple_cost ({cpu_tuple_cost}) per tuple. There are {tuples} tuple(s)"
+        cost = trunc(cpu_tuple_cost * tuples)
+        if expected_cost != cost:
+            comment = f"Perhaps the cost per tuple here is {(expected_cost - cost) / tuples} instead."
+        return (cost, explanation, comment)
+
 def explain_sort(node: dict) -> str:
     tuples = node["Plan Rows"]
     width = node["Plan Width"]
@@ -276,7 +296,7 @@ def explain_sort(node: dict) -> str:
     return total_cost, explanation
 
 fn_dict = {
-    "Result": None,
+    "Result": explain_result,
     "ProjectSet": None,
     "ModifyTable": None,
     "Append": explain_append,
