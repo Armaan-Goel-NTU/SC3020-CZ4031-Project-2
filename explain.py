@@ -116,6 +116,29 @@ def explain_materialize(node: dict) -> str:
     explanation += f"Additional cost incurred is {cost:.2f}"
     return (cost + child['Total Cost'], explanation)
 
+def explain_merge_append(node: dict) -> str: 
+    cpu_operator_cost = float(cache.get_setting("cpu_operator_cost"))
+    cpu_tuple_cost = float(cache.get_setting("cpu_tuple_cost"))
+    tuples = sum(child["Plan Rows"] for child in node.get("Plans", []))
+
+    N = max(2,len(node["Plans"]))
+    logN = math.log2(N)
+    comparison_cost = 2.0 * cpu_operator_cost
+
+    startup_cost = comparison_cost * N * logN
+    explanation = f"In the startup phase, a Heap is built for each child node (N={N} in this case)\n"
+    explanation += f"This will cost N * log2(N) * comparison cost. Comparison cost is 2 * cpu_operator_cost ({cpu_operator_cost})\n"
+    explanation += f"Additional startup cost comes out to be {startup_cost:.2f}\n"
+
+    run_cost = tuples * comparison_cost * logN
+    run_cost += cpu_tuple_cost * 0.5 * tuples
+    explanation += f"A per-tuple heap maintaince cost of comparison_cost * log2(N) applied.\n"
+    explanation += f"cpu_tuple_cost ({cpu_tuple_cost}) * the append multiplier (0.5) is also applied per tuple for overhead\n"
+    explanation += f"For {tuples} tuples, the run cost is an additional {run_cost:.2f}"
+
+    return (startup_cost + run_cost + sum(child["Total Cost"] for child in node.get("Plans", [])), explanation)
+
+
 def explain_append(node: dict) -> str:
     # gather child costs
     cpu_tuple_cost = float(cache.get_setting("cpu_tuple_cost"))
@@ -319,7 +342,7 @@ fn_dict = {
     "ProjectSet": None,
     "ModifyTable": None,
     "Append": explain_append,
-    "Merge Append": None,
+    "Merge Append": explain_merge_append,
     "Recursive Union": None,
     "BitmapAnd": None,
     "BitmapOr": None,
@@ -413,6 +436,7 @@ class Connection():
             return "No database connection found! There is no context for this query."
 
         cur = self.connection.cursor()
+        cur.execute("SET enable_parallel_append = 'off'")
         try:
             cur.execute(f"EXPLAIN (COSTS, FORMAT JSON) {query}")
         except Exception as e:
