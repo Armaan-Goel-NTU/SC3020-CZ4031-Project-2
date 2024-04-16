@@ -14,7 +14,7 @@ class Cache():
         self.cur = cur
     
     def query_setting(self, setting: str):
-        self.cur.execute(f"SHOW {setting}")
+        self.cur.execute(f"SELECT setting FROM pg_settings WHERE name = '{setting}'")
         return self.cur.fetchall()[0][0]
 
     def query_pagecount(self, relation: str):
@@ -256,7 +256,7 @@ fn_dict = {
     "Sample Scan": None,
     "Gather": explain_gather,
     "Gather Merge": None,
-    "Index Scan": None,
+    "Index Scan": explain_indexscan,
     "Index Only Scan": None,
     "Bitmap Index Scan": None,
     "Bitmap Heap Scan": None,
