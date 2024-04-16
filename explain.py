@@ -337,6 +337,55 @@ def explain_sort(node: dict) -> str:
                   f"Total cost: {total_cost:.2f}."
     return total_cost, explanation
 
+#TODO: can make sum of children more precise (check if bitmap and/or/index for these functions)
+def explain_bitmap_or(node: dict) -> str:
+    cpu_operator_cost = float(cache.get_setting("cpu_operator_cost"))
+    cost = sum([child["Total Cost"] for child in node.get("Plans", [])])
+    tuples = node["Plan Rows"]
+
+    num_index = 0
+    num_cost = 0
+    first = True
+    for child in node["Plans"]:
+        if child["Node Type"] == "Bitmap Index Scan":
+            cost += tuples * cpu_operator_cost * 0.1
+            num_index += 1
+        elif not first:
+            cost += 100 * cpu_operator_cost
+            num_cost += 1
+        if first:
+            first = False
+
+
+    
+    explanation = f"The startup and total costs for the BitmapOr operator are the same\n"
+    explanation += f"The total cost consists of the sum of all the child operators\n"
+    explanation += f"For each child index scan ({num_index} in this case), an overhead of 0.1 * cpu_operator_cost ({cpu_operator_cost}) * tuples ({tuples}) is added.\n"
+    explanation += f"The bitwise operation cost is 100 * cpu_operator_cost ({cpu_operator_cost}). It is applied for all non-index children except the first one ({num_cost})\n"
+    explanation += f"The total comes out to be {cost:.2f}"
+    
+    return (cost, explanation)
+
+def explain_bitmap_and(node: dict) -> str:
+    cpu_operator_cost = float(cache.get_setting("cpu_operator_cost"))
+    cost = sum([child["Total Cost"] for child in node.get("Plans", [])])
+    tuples = node["Plan Rows"]
+
+    num_index = 0
+    for child in node["Plans"]:
+        if child["Node Type"] == "Bitmap Index Scan":
+            cost += tuples * cpu_operator_cost * 0.1
+            num_index += 1
+    
+    cost += (len(node["Plans"]) - 1) * 100 * cpu_operator_cost
+    explanation = f"The startup and total costs for the BitmapOr operator are the same\n"
+    explanation += f"The total cost consists of the sum of all the child operators\n"
+    explanation += f"For each child index scan ({num_index} in this case), an overhead of 0.1 * cpu_operator_cost ({cpu_operator_cost}) * tuples ({tuples}) is added.\n"
+    explanation += f"The bitwise operation cost is 100 * cpu_operator_cost ({cpu_operator_cost}). It is applied for all children except the first ({len(node['Plans']) - 1})\n"
+    explanation += f"The total comes out to be {cost:.2f}"
+    
+    return (cost, explanation)
+
 fn_dict = {
     "Result": explain_result,
     "ProjectSet": None,
@@ -344,8 +393,8 @@ fn_dict = {
     "Append": explain_append,
     "Merge Append": explain_merge_append,
     "Recursive Union": None,
-    "BitmapAnd": None,
-    "BitmapOr": None,
+    "BitmapAnd": explain_bitmap_and,
+    "BitmapOr": explain_bitmap_or,
     "Nested Loop": None,
     "Merge Join": None,
     "Hash Join": None,
