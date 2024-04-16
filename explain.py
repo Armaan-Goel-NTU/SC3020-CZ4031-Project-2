@@ -392,7 +392,7 @@ def explain_group(node: dict) -> str:
     input_tuples = node["Plans"][0]["Plan Rows"]
     total_cost = cpu_operator_cost * input_tuples * numGroupCols
 
-    explanation = f"The startup cost for a group operator is the same as its child\n"
+    explanation = f"There is no additional startup cost for the Group operator\n"
     explanation = f"cpu_operator_cost ({cpu_operator_cost}) is incurred for every input tuple ({input_tuples}) and grouping clause ({numGroupCols}) combination\n"
 
     if "Filter" in node:
@@ -407,9 +407,28 @@ def explain_group(node: dict) -> str:
 
     return (total_cost + node["Plans"][0]["Total Cost"], explanation)
 
-#TODO idk about this one
+#TODO find a query that uses lockrows
 def explain_lockrows(node: dict) -> str:
-    return (0, "<b>Comment</b>: No cost associated with this node.")
+    cpu_tuple_cost = float(cache.get_setting("cpu_tuple_cost"))
+    tuples = node["Plans"][0]["Plan Rows"]
+    total_cost = cpu_tuple_cost * tuples
+    explanation = f"There is no additional startup cost for the LockRows operator\n"
+    explanation += f"Lock rows incurs cpu_tuple_cost ({cpu_tuple_cost}) for each input row ({tuples})\n"
+    explanation += f"This adds {total_cost}"
+    return (total_cost + node["Plans"][0]["Total Cost"], explanation)
+
+def explain_setop(node: dict) -> str:
+    cpu_operator_cost = float(cache.get_setting("cpu_operator_cost"))
+    subpath_cost = node["Plans"][0]["Total Cost"]
+    expected_cost = node["Total Cost"] - subpath_cost
+    explanation = f"There is no additional startup cost for the SetOp operator\n"
+    tuples = node["Plans"][0]["Plan Rows"]
+    total_cost = cpu_operator_cost * tuples
+    len_disctint = expected_cost/total_cost
+    total_cost *= len_disctint
+    explanation += f"cpu_operator_cost ({cpu_operator_cost}) is incurred for every row ({tuples}) and distinct column {(int(len_disctint))} combination\n"
+    explanation += f"This adds a cost of {total_cost}"
+    return (total_cost + subpath_cost, explanation)
 
 fn_dict = {
     "Result": explain_result,
@@ -450,7 +469,7 @@ fn_dict = {
     "Aggregate": None,
     "WindowAgg": None,
     "Unique": None,
-    "SetOp": None,
+    "SetOp": explain_setop,
     "LockRows": explain_lockrows,
     "Limit": explain_limit,
     "Hash": None
