@@ -2,11 +2,10 @@ from collections import deque
 import psycopg
 import json
 import re
-import decimal
 import math
 
 def trunc(a : float) -> float:
-    return float(decimal.Decimal(str(a)).quantize(decimal.Decimal('.01'), rounding=decimal.ROUND_DOWN))
+    return round(a, 2)
 
 cache = None
 class Cache():
@@ -16,10 +15,6 @@ class Cache():
     
     def query_setting(self, setting: str):
         self.cur.execute(f"SELECT setting FROM pg_settings WHERE name = '{setting}'")
-        return self.cur.fetchall()[0][0]
-
-    def query_setting_show(self, setting: str):
-        self.cur.execute(f"SHOW {setting}")
         return self.cur.fetchall()[0][0]
 
     def query_pagecount(self, relation: str):
@@ -34,12 +29,6 @@ class Cache():
         key = f"setting/{setting}"
         if key not in self.dict:
             self.dict[key] = self.query_setting(setting)
-        return self.dict[key]
-
-    def get_setting_show(self, setting: str):
-        key = f"show-setting/{setting}"
-        if key not in self.dict:
-            self.dict[key] = self.query_setting_show(setting)
         return self.dict[key]
             
     def get_page_count(self, relation: str):
@@ -118,7 +107,7 @@ def explain_materialize(node: dict) -> str:
     block_size = float(cache.get_setting("block_size"))
 
     if nbytes > work_mem_bytes:
-        explanation += f"The relation to materialize is larger that working memory space of {cache.query_setting_show('work_mem')}\n"
+        explanation += f"The relation to materialize is larger that working memory space of {work_mem_bytes / 1024}KB\n"
         npages = math.ceil(nbytes/block_size)
         explanation += f"Disk costs will be incurred. The projected amount to materialize is {nbytes}, which will take {npages} to fit with a page size of {block_size}\n"
         f"seq_page_cost ({seq_page_cost}) will be incurred for each page.\n"
@@ -182,7 +171,37 @@ def explain_gather(node: dict) -> str:
     explanation += f"Total Gather node cost: {total_cost} (including parallel overhead)"
 
     return (total_cost, explanation)
-    
+
+def explain_gather_merge(node: dict) -> str:
+    parallel_setup_cost = float(cache.get_setting("parallel_setup_cost"))
+    parallel_tuple_cost = float(cache.get_setting("parallel_tuple_cost"))
+    cpu_operator_cost = float(cache.get_setting("cpu_operator_cost"))
+    rows = node["Plan Rows"]
+    comparison_cost = 2.0 * cpu_operator_cost
+
+    subpath = node['Plans'][0]  # Assuming the first plan is the subpath
+    subpath_total_cost = subpath['Total Cost']
+
+    N = node["Workers Planned"] + 1
+    logN = math.log2(N) 
+
+    startup_cost = comparison_cost * N * logN
+    startup_cost += parallel_setup_cost
+    explanation = f"In the startup phase, a Heap is built for each parallel worker ({N} in this case)\n"
+    explanation += f"This will cost N * log2(N) * comparison cost. Comparison cost is 2 * cpu_operator_cost ({cpu_operator_cost})\n"
+    explanation += f"Startup also includes the parallel setup cost of {parallel_setup_cost}\n"
+    explanation += f"Additional startup cost comes out to be {startup_cost:.2f}\n"
+
+    run_cost = rows * comparison_cost * logN
+    run_cost += cpu_operator_cost * rows
+    run_cost += parallel_tuple_cost * rows * 1.05
+    explanation += f"A per-tuple heap maintaince cost of comparison_cost * log2(N) applied.\n"
+    explanation += f"cpu_operator_cost ({cpu_operator_cost}) is also applied per tuple for heap management overhead\n"
+    explanation += f"Lastly, parallel_tuple_cost ({parallel_tuple_cost}) and a 5% penalty to wait for every work is also incurred.\n"
+    explanation += f"For {rows} tuples, the run cost is an additional {run_cost:.2f}"
+
+    return (startup_cost + run_cost + subpath_total_cost, explanation)
+
 def explain_limit(node: dict) -> str:
     if 'Plans' not in node or len(node['Plans']) != 1:
         return (0, "Limit node must have exactly one child plan.")
@@ -310,7 +329,7 @@ fn_dict = {
     "Seq Scan": explain_seqscan,
     "Sample Scan": None,
     "Gather": explain_gather,
-    "Gather Merge": None,
+    "Gather Merge": explain_gather_merge,
     "Index Scan": explain_indexscan,
     "Index Only Scan": None,
     "Bitmap Index Scan": None,
@@ -363,19 +382,25 @@ class Connection():
             return str(e)
     
     def get_explanation(self, node: dict) -> str:
-        if "Total Cost" not in node or node["Total Cost"] == 0:
+        if "Total Cost" not in node:
             return "<b>Comment</b>: No cost associated with this node."
 
         node_type = node["Node Type"] 
         if node_type in fn_dict and fn_dict[node_type] is not None:
             try:
+                expected_cost = node["Total Cost"]
                 params = fn_dict[node_type](node)
-                cost = trunc(params[0])
+                full_cost = params[0]
+                cost = trunc(full_cost)
                 explanation = params[1]
-                color = "c0ebcc" if cost == node["Total Cost"] else "ebc6c0"
+                color = "c0ebcc" if cost == expected_cost else "ebc6c0"
                 explanation = f"<b>Calculated Cost</b>: <span style=\"background-color:#{color};\">{cost}</span>\n<b>Explanation</b>: {explanation}"
                 if len(params) > 2 and len(params[2]) > 0:
                     explanation += f"\n<b>Comments</b>: {params[2]}"
+                elif cost != expected_cost:
+                    diff = abs(full_cost - expected_cost)
+                    if diff < 0.01:
+                        explanation += f"\n<b>Comments</b>: Calculated cost is off by 0.01. The actual difference is around {diff:.4f}, which is most likely a rounding error."
                 return explanation
             except Exception as e:
                 return f"<b>Comment</b>: Encountered an error when generating an explanation. {str(e)}"
