@@ -430,6 +430,16 @@ def explain_setop(node: dict) -> str:
     explanation += f"This adds a cost of {total_cost}"
     return (total_cost + subpath_cost, explanation)
 
+def explain_subqueryscan(node: dict) -> str:
+    explanation = f"There is no additional startup cost for the Subquery Scan operator\n"
+    cpu_tuple_cost = float(cache.get_setting("cpu_tuple_cost"))
+    subpath_cost = node["Plans"][0]["Total Cost"]
+    tuples = node["Plans"][0]["Plan Rows"]
+    total_cost = cpu_tuple_cost * tuples
+    explanation += f"cpu_tuple_cost ({cpu_tuple_cost}) is incurred for every input row ({tuples})\n"
+    explanation += f"This adds a cost of {total_cost}"
+    return (total_cost + subpath_cost, explanation)
+
 fn_dict = {
     "Result": explain_result,
     "ProjectSet": None,
@@ -452,7 +462,7 @@ fn_dict = {
     "Bitmap Heap Scan": None,
     "Tid Scan": None,
     "Tid Range Scan": None,
-    "Subquery Scan": None,
+    "Subquery Scan": explain_subqueryscan,
     "Function Scan": None,
     "Table Function Scan": None,
     "Values Scan": None,
