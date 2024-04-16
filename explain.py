@@ -440,6 +440,16 @@ def explain_subqueryscan(node: dict) -> str:
     explanation += f"This adds a cost of {total_cost}"
     return (total_cost + subpath_cost, explanation)
 
+def explain_valuescan(node: dict) -> str:
+    explanation = f"There is no startup cost for the Subquery Scan operator\n"
+    cpu_operator_cost = float(cache.get_setting("cpu_operator_cost"))
+    cpu_tuple_cost = float(cache.get_setting("cpu_tuple_cost"))
+    tuples = node["Plan Rows"]
+    total_cost = (cpu_operator_cost + cpu_tuple_cost) * tuples
+    explanation += f"cpu_tuple_cost ({cpu_tuple_cost}) and cpu_operator_cost ({cpu_operator_cost}) is incurred for every input row ({tuples})\n"
+    explanation += f"The total cost is {total_cost}"
+    return (total_cost, explanation)
+
 fn_dict = {
     "Result": explain_result,
     "ProjectSet": None,
@@ -465,7 +475,7 @@ fn_dict = {
     "Subquery Scan": explain_subqueryscan,
     "Function Scan": None,
     "Table Function Scan": None,
-    "Values Scan": None,
+    "Values Scan": explain_valuescan,
     "CTE Scan": None,
     "Named Tuplestore Scan": None,
     "WorkTable Scan": None,
