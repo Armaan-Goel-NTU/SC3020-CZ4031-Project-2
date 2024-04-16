@@ -3,6 +3,7 @@ import psycopg
 import json
 import re
 import decimal
+import math
 
 def trunc(a : float) -> float:
     return float(decimal.Decimal(str(a)).quantize(decimal.Decimal('.01'), rounding=decimal.ROUND_DOWN))
@@ -17,6 +18,10 @@ class Cache():
         self.cur.execute(f"SELECT setting FROM pg_settings WHERE name = '{setting}'")
         return self.cur.fetchall()[0][0]
 
+    def query_setting_show(self, setting: str):
+        self.cur.execute(f"SHOW {setting}")
+        return self.cur.fetchall()[0][0]
+
     def query_pagecount(self, relation: str):
         self.cur.execute(f"SELECT relpages FROM pg_class WHERE relname = '{relation}'")
         return self.cur.fetchall()[0][0]
@@ -29,6 +34,12 @@ class Cache():
         key = f"setting/{setting}"
         if key not in self.dict:
             self.dict[key] = self.query_setting(setting)
+        return self.dict[key]
+
+    def get_setting_show(self, setting: str):
+        key = f"show-setting/{setting}"
+        if key not in self.dict:
+            self.dict[key] = self.query_setting_show(setting)
         return self.dict[key]
             
     def get_page_count(self, relation: str):
@@ -81,13 +92,40 @@ def explain_seqscan(node: dict) -> str:
         expected_cost *= workers
         expected_cost -= cpu_tuple_cost
 
-        
         if expected_cost != filter_cost:
             comment = f"The difference in costs is likely due to the way filtering is handled. The expected filtering cost is {expected_cost:.4f}, but we have used {filter_cost}"
 
     explanation += f"Plugging in these values, we get {cost}"
 
     return (cost, explanation, comment)
+
+def align(val : int, len : int) -> int:
+    return val + (len - (val % len))
+
+def explain_materialize(node: dict) -> str:
+    tuples = node["Plan Rows"]
+    width = node["Plan Width"]
+    child = node["Plans"][0]
+    startup_cost = child["Startup Cost"]
+
+    explanation = f"Materialize has the same startup cost as its child. ({startup_cost})\n"
+    work_mem_bytes = float(cache.get_setting("work_mem")) * 1024
+    cpu_operator_cost = float(cache.get_setting("cpu_operator_cost"))
+    seq_page_cost = float(cache.get_setting("seq_page_cost"))
+    nbytes = tuples * (align(width, 8) + align(23, 8))
+    explanation += f"Materialize charges 2 * cpu_operator_cost ({cpu_operator_cost}) per tuple as overhead. There are {tuples} tuple(s)\n"
+    cost = 2 * cpu_operator_cost * tuples
+    block_size = float(cache.get_setting("block_size"))
+
+    if nbytes > work_mem_bytes:
+        explanation += f"The relation to materialize is larger that working memory space of {cache.query_setting_show('work_mem')}\n"
+        npages = math.ceil(nbytes/block_size)
+        explanation += f"Disk costs will be incurred. The projected amount to materialize is {nbytes}, which will take {npages} to fit with a page size of {block_size}\n"
+        f"seq_page_cost ({seq_page_cost}) will be incurred for each page.\n"
+        cost += npages
+    
+    explanation += f"Additional cost incurred is {cost:.2f}"
+    return (cost + child['Total Cost'], explanation)
 
 def explain_append(node: dict) -> str:
     # gather child costs
@@ -192,9 +230,6 @@ def explain_indexscan(node: dict) -> str:
     
     return (cost, explanation)
 
-
-import math
-
 def explain_sort(node: dict) -> str:
     tuples = node["Plan Rows"]
     width = node["Plan Width"]
@@ -271,7 +306,7 @@ fn_dict = {
     "WorkTable Scan": None,
     "Foreign Scan": None,
     "Custom Scan": None,
-    "Materialize": None,
+    "Materialize": explain_materialize,
     "Memoize": None,
     "Sort": explain_sort,
     "Incremental Sort": None,
