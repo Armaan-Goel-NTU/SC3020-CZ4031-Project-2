@@ -7,7 +7,7 @@ import platform
 import os
 import webbrowser
 
-default_text = "Click a node (operator) to get all the relevant info!"
+default_text = "Click a node (operator) to get all the relevant info! Extra comments are provided for mismatching costs."
 
 css = """            #info-box {
                 position: absolute;
@@ -178,6 +178,8 @@ class Visualizer():
             else:
                 img = ImageMapper[label]["image"]
                 label = ImageMapper[label]["image_text"]
+        
+        label += f"\n{plan['Startup Cost']}..{plan['Total Cost']}\n{plan['Plan Rows']} {'row' if plan['Plan Rows'] == 1 else 'rows'}"
         self.imagemap[self.node_id] = img
         self.explainmap[self.node_id] = plan["Explanation"]
 
@@ -350,7 +352,7 @@ class App():
     
     def explain_btn_command(self) -> None:
         self.set_status("")
-        explain_res = CONN.explain(query=self.explain_input.get("1.0",'end-1c'), log_cb=self.set_status)
+        explain_res = CONN.explain(query=self.explain_input.get("1.0",'end-1c'), log_cb=self.set_status, force_analysis=True)
         if type(explain_res) == str:
             self.set_status(status=explain_res)
         else:

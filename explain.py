@@ -1,5 +1,11 @@
 from collections import deque
 import psycopg
+import json
+import re
+import decimal
+
+def trunc(a : float) -> float:
+    return float(decimal.Decimal(str(a)).quantize(decimal.Decimal('.01'), rounding=decimal.ROUND_DOWN))
 
 cache = None
 class Cache():
@@ -8,35 +14,80 @@ class Cache():
         self.cur = cur
     
     def query_setting(self, setting: str):
-        self.cur.execute(f"SELECT setting FROM pg_settings WHERE name = '{setting}'")
+        self.cur.execute(f"SHOW {setting}")
         return self.cur.fetchall()[0][0]
 
     def query_pagecount(self, relation: str):
-        self.cur.execute(f"SELECT pg_relation_size('{relation}'::regclass) / current_setting('block_size')::BIGINT;")
+        self.cur.execute(f"SELECT relpages FROM pg_class WHERE relname = '{relation}'")
+        return self.cur.fetchall()[0][0]
+
+    def query_tuplecount(self, relation: str):
+        self.cur.execute(f"SELECT reltuples FROM pg_class where relname = '{relation}'")
         return self.cur.fetchall()[0][0]
     
     def get_setting(self, setting: str):
-        if setting not in self.dict:
-            self.dict[setting] = self.query_setting(setting)
-        return self.dict[setting]
+        key = f"setting/{setting}"
+        if key not in self.dict:
+            self.dict[key] = self.query_setting(setting)
+        return self.dict[key]
             
     def get_page_count(self, relation: str):
         key = f"relpages/{relation}"
         if key not in self.dict:
             self.dict[key] = self.query_pagecount(relation)
-        return self.dict[key]            
+        return self.dict[key]        
+
+    def get_tuple_count(self, relation: str):
+        key = f"reltuples/{relation}"    
+        if key not in self.dict:
+            self.dict[key] = self.query_tuplecount(relation)
+        return self.dict[key]
+    
+    def set_tuple_count(self, relation: str, count:int):
+        key = f"reltuples/{relation}"
+        self.dict[key] = count
 
 def explain_seqscan(node: dict) -> str:
     cpu_tuple_cost = float(cache.get_setting("cpu_tuple_cost"))
     seq_page_cost = float(cache.get_setting("seq_page_cost"))
-    print(node["Relation Name"])
-    page_count = cache.get_page_count(node["Relation Name"])
-    row_count = node["Plan Rows"]
+    rel = node["Relation Name"]
+    page_count = cache.get_page_count(rel)
+    row_count = cache.get_tuple_count(rel)
+    comment = ""
+    workers = 1
+    filter_cost = 0
 
-    cost = cpu_tuple_cost * row_count + seq_page_cost * page_count
-    explanation = f"Sequential Scan has a cpu cost of cpu_tuple_cost * T(R) and a disk cost of seq_page_cost * B(R).\nB(R) = {page_count}, T(R) = {row_count}, cpu_tuple_cost={cpu_tuple_cost}, seq_page_cost={seq_page_cost}. Plugging in these values, we get {cost}"
+    explanation = f"Sequential Scan has a cpu cost of cpu_tuple_cost * T(R) and a disk cost of seq_page_cost * B(R).\n"
+    explanation += f"B(R) = {page_count}, T(R) = {row_count}, cpu_tuple_cost={cpu_tuple_cost}, seq_page_cost={seq_page_cost}.\n"
+    if "Filter" in node:
+        pattern = r"\([^()]*\)"
+        filters = len(re.findall(pattern, node["Filter"]))
+        cpu_operator_cost = float(cache.get_setting("cpu_operator_cost"))
+        filter_cost = filters * cpu_operator_cost
+        explanation += f"CPU cost per tuple is increased by {filter_cost:.4f} for {filters} filters * cpu_operator_cost ({cpu_operator_cost})\n"
 
-    return (cost, explanation)
+    if node["Parallel Aware"] and "Workers Planned" in node:
+        workers = node["Workers Planned"]
+        if cache.get_setting("parallel_leader_participation") == "on" and workers < 4:
+            workers += 1 - (workers * 0.3)
+        explanation += f"The total CPU cost is reduced by a parallelization factor of {workers:.1f}\n" 
+
+    disk_cost = seq_page_cost * page_count
+    cost = trunc((cpu_tuple_cost + filter_cost)/workers * row_count + disk_cost)
+    expected_cost = node["Total Cost"]
+    if cost != expected_cost and "Filter" in node:
+        expected_cost -= disk_cost
+        expected_cost /= row_count
+        expected_cost *= workers
+        expected_cost -= cpu_tuple_cost
+
+        
+        if expected_cost != filter_cost:
+            comment = f"The difference in costs is likely due to the way filtering is handled. The expected filtering cost is {expected_cost:.4f}, but we have used {filter_cost}"
+
+    explanation += f"Plugging in these values, we get {cost}"
+
+    return (cost, explanation, comment)
 
 def explain_append(node: dict) -> str:
     # gather child costs
@@ -263,15 +314,20 @@ class Connection():
         node_type = node["Node Type"] 
         if node_type in fn_dict and fn_dict[node_type] is not None:
             try:
-                cost, explanation = fn_dict[node_type](node)
-                comment = "Costs Match!" if cost == node["Total Cost"] else "Mismatch!"
-                return f"<b>Cost</b>: {cost}\n<b>Explanation</b>: {explanation}\n<b>Postgres Cost</b>: {node['Total Cost']}\n<b>Comment</b>: {comment}"
+                params = fn_dict[node_type](node)
+                cost = trunc(params[0])
+                explanation = params[1]
+                color = "c0ebcc" if cost == node["Total Cost"] else "ebc6c0"
+                explanation = f"<b>Calculated Cost</b>: <span style=\"background-color:#{color};\">{cost}</span>\n<b>Explanation</b>: {explanation}"
+                if len(params) > 2 and len(params[2]) > 0:
+                    explanation += f"\n<b>Comments</b>: {params[2]}"
+                return explanation
             except Exception as e:
                 return f"<b>Comment</b>: Encountered an error when generating an explanation. {str(e)}"
         
         return f"<b>Comment</b>: I really don't know how to explain the cost for this operator!"
 
-    def explain(self, query:str, log_cb: callable) -> str:
+    def explain(self, query:str, force_analysis:bool, log_cb: callable) -> str:
         self.log = log_cb
         if not self.connected():
             return "No database connection found! There is no context for this query."
@@ -283,16 +339,42 @@ class Connection():
             return f"Error: {str(e)}"
 
         plan = cur.fetchall()[0][0][0]['Plan']
+        with open("plan.json","w") as f:
+            f.write(json.dumps(plan, indent=2))
         node_stack = deque()
 
-        def add_nodes(node):
+        def add_nodes(node, workers):
+            if "Workers Planned" in node:
+                workers = node["Workers Planned"]
+            elif node["Parallel Aware"]:
+                node["Workers Planned"] = workers
             node_stack.append(node)
             if "Plans" in node:
                 for child_plan in node["Plans"]:
-                    add_nodes(child_plan)
+                    add_nodes(child_plan, workers)
 
-        add_nodes(plan)
-        
+        add_nodes(plan, 1)
+
+        if force_analysis:
+            stack_copy = node_stack.copy()
+            reexplain = False
+            for _ in range(len(stack_copy)):
+                node = stack_copy.pop()
+                if "Relation Name" in node:
+                    rel = node["Relation Name"]
+                    tuple_count = cache.query_tuplecount(rel)
+                    if tuple_count == -1:
+                        reexplain = True
+                        try:
+                            cur.execute(f"ANALYZE {rel}")
+                        except Exception as e:
+                            return f"Error: {str(e)}"
+                    else:
+                        cache.set_tuple_count(rel, tuple_count)
+                        
+            if reexplain:
+                return self.explain(query, False, log_cb)
+                
         for _ in range(len(node_stack)):
             node = node_stack.pop()
             node["Explanation"] = self.get_explanation(node)
