@@ -153,7 +153,7 @@ class Visualizer():
                 }
             }
             img = f"img/{self.imagemap[node[0]]}"
-            net.add_node(node[0], label=node[1], explanation=self.explainmap[node[0]], x = pos[node[0]][0] * 1000, y = pos[node[0]][1] * 1000, shape="circularImage", image=img, borderWidth = 1.5, borderWidthSelected = 2, color=color, size=25)
+            net.add_node(node[0], label=node[1], explanation=self.explainmap[node[0]], x = pos[node[0]][0] * 1500, y = pos[node[0]][1] * 1500, shape="circularImage", image=img, borderWidth = 1.5, borderWidthSelected = 2, color=color, size=25)
         
         for edge in graph.edges:
             net.add_edge(edge[0], edge[1], color="black", width = 2, chosen=False, arrowStrikethrough=False)

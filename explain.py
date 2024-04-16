@@ -398,8 +398,8 @@ class Connection():
                 if len(params) > 2 and len(params[2]) > 0:
                     explanation += f"\n<b>Comments</b>: {params[2]}"
                 elif cost != expected_cost:
-                    diff = abs(full_cost - expected_cost)
-                    if diff < 0.01:
+                    diff = trunc(abs(full_cost - expected_cost))
+                    if diff <= 0.01:
                         explanation += f"\n<b>Comments</b>: Calculated cost is off by 0.01. The actual difference is around {diff:.4f}, which is most likely a rounding error."
                 return explanation
             except Exception as e:
