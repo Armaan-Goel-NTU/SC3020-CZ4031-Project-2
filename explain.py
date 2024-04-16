@@ -93,7 +93,35 @@ def explain_gather(node: dict) -> str:
     explanation += f"Total Gather node cost: {total_cost} (including parallel overhead)"
 
     return (total_cost, explanation)
+    
+def explain_limit(node: dict) -> str:
+    if 'Plans' not in node or len(node['Plans']) != 1:
+        return (0, "Limit node must have exactly one child plan.")
 
+    # Extract child plan
+    child_plan = node['Plans'][0]
+    child_total_cost = child_plan['Total Cost']
+    child_startup_cost = child_plan['Startup Cost']
+    child_plan_rows = child_plan['Plan Rows']
+
+    # Get the limit value
+    limit_count = node.get('Plan Rows', child_plan_rows)  # Default to all rows if no limit specified
+
+    
+    if limit_count < child_plan_rows:
+        cost_per_row = (child_total_cost - child_startup_cost) / child_plan_rows if child_plan_rows else 0
+        total_cost = child_startup_cost + cost_per_row * limit_count
+        total_cost = round(total_cost, 2)
+        explanation = f"Limit operation processes only the first {limit_count} rows of its child node. "
+        explanation += f"Total cost is reduced proportionally based on the reduced number of rows processed. "
+        explanation += f"Estimated reduced cost: {total_cost}, based on original total cost: {child_total_cost} and row count: {child_plan_rows}."
+    else:
+        total_cost = child_total_cost
+        total_cost = round(total_cost, 2)
+        explanation = f"Limit operation does not reduce the number of rows processed as the limit ({limit_count}) is higher than or equal to the child's row count ({child_plan_rows}). Total cost remains unchanged."
+    
+    
+    return (total_cost, explanation)
 
 fn_dict = {
     "Result": None,
@@ -136,7 +164,7 @@ fn_dict = {
     "Unique": None,
     "SetOp": None,
     "LockRows": None,
-    "Limit": None,
+    "Limit": explain_limit,
     "Hash": None
 }
 
