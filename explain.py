@@ -407,6 +407,10 @@ def explain_group(node: dict) -> str:
 
     return (total_cost + node["Plans"][0]["Total Cost"], explanation)
 
+#TODO idk about this one
+def explain_lockrows(node: dict) -> str:
+    return (0, "<b>Comment</b>: No cost associated with this node.")
+
 fn_dict = {
     "Result": explain_result,
     "ProjectSet": None,
@@ -447,7 +451,7 @@ fn_dict = {
     "WindowAgg": None,
     "Unique": None,
     "SetOp": None,
-    "LockRows": None,
+    "LockRows": explain_lockrows,
     "Limit": explain_limit,
     "Hash": None
 }
