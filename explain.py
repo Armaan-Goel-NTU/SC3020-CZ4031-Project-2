@@ -436,7 +436,6 @@ class Connection():
             return "No database connection found! There is no context for this query."
 
         cur = self.connection.cursor()
-        cur.execute("SET enable_parallel_append = 'off'")
         try:
             cur.execute(f"EXPLAIN (COSTS, FORMAT JSON) {query}")
         except Exception as e:
