@@ -285,7 +285,7 @@ def explain_result(node: dict) -> str:
     else:
         if expected_cost == 0:
             return (0, "Result usually has additional no cost associated with it.")
-        cpu_tuple_cost = cache.get_setting("cpu_tuple_cost")
+        cpu_tuple_cost = float(cache.get_setting("cpu_tuple_cost"))
         explanation = f"Result incurs cpu_tuple_cost ({cpu_tuple_cost}) per tuple. There are {tuples} tuple(s)"
         cost = trunc(cpu_tuple_cost * tuples)
         if expected_cost != cost:
@@ -356,8 +356,6 @@ def explain_bitmap_or(node: dict) -> str:
         if first:
             first = False
 
-
-    
     explanation = f"The startup and total costs for the BitmapOr operator are the same\n"
     explanation += f"The total cost consists of the sum of all the child operators\n"
     explanation += f"For each child index scan ({num_index} in this case), an overhead of 0.1 * cpu_operator_cost ({cpu_operator_cost}) * tuples ({tuples}) is added.\n"
@@ -430,6 +428,7 @@ def explain_setop(node: dict) -> str:
     explanation += f"This adds a cost of {total_cost}"
     return (total_cost + subpath_cost, explanation)
 
+#TODO: check if filtering needed
 def explain_subqueryscan(node: dict) -> str:
     explanation = f"There is no additional startup cost for the Subquery Scan operator\n"
     cpu_tuple_cost = float(cache.get_setting("cpu_tuple_cost"))
@@ -440,6 +439,7 @@ def explain_subqueryscan(node: dict) -> str:
     explanation += f"This adds a cost of {total_cost}"
     return (total_cost + subpath_cost, explanation)
 
+#TODO: check if filtering needed
 def explain_valuescan(node: dict) -> str:
     explanation = f"There is no startup cost for the Subquery Scan operator\n"
     cpu_operator_cost = float(cache.get_setting("cpu_operator_cost"))
@@ -450,13 +450,50 @@ def explain_valuescan(node: dict) -> str:
     explanation += f"The total cost is {total_cost}"
     return (total_cost, explanation)
 
+def explain_modify_table(node: dict) -> str:
+    explanation = f"There is no cost associated with this node."
+    return (node["Plans"][0]["Total Cost"], explanation)
+
+def explain_project_set(node: dict) -> str:
+    explanation = f"There is no startup cost for the ProjectSet operator\n"
+    cpu_tuple_cost = float(cache.get_setting("cpu_tuple_cost"))
+    subpath_cost = node["Plans"][0]["Total Cost"]
+    subpath_tuples = node["Plans"][0]["Plan Rows"]
+    tuples = node["Plan Rows"]
+
+    run_cost = cpu_tuple_cost * subpath_tuples
+    run_cost += (tuples - subpath_tuples) * cpu_tuple_cost / 2
+
+    explanation += f"cpu_tuple_cost ({cpu_tuple_cost}) is incurred for every input row {subpath_tuples}\n"
+    explanation += f"half of cpu_tuple_cost ({cpu_tuple_cost/2}) is incurred for every added output row {tuples - subpath_tuples}\n"
+    explanation += f"This adds {run_cost} to the total cost"
+    return (run_cost + subpath_cost, explanation)
+
+def explain_recursive_union(node: dict) -> str:
+    explanation = f"There is no startup cost for the Recursive Union operator\n"
+    nterm = node["Plans"][0]
+    rterm = node["Plans"][1]
+
+    total_cost = nterm["Total Cost"]
+    explanation += f"The initial cost is the same as the non-recursive term ({total_cost})\n"
+
+    total_cost += 10 * rterm["Total Cost"]
+    explanation += f"Assuming 10 recursions, the cost of the recursive term ({rterm['Total Cost']}) is added 10 times\n"
+
+    cpu_tuple_cost = float(cache.get_setting("cpu_tuple_cost"))
+    total_rows = node["Plan Rows"]
+    total_cost += cpu_tuple_cost * total_rows
+    explanation += f"Finally, cpu_tuple_cost ({cpu_tuple_cost}) is incurred for every output row ({total_rows})"
+
+    return (total_cost, explanation)
+
 fn_dict = {
     "Result": explain_result,
-    "ProjectSet": None,
-    "ModifyTable": None,
+    "ProjectSet": explain_project_set,
+    "ModifyTable": explain_modify_table,
     "Append": explain_append,
     "Merge Append": explain_merge_append,
-    "Recursive Union": None,
+    "Recursive Union": explain_recursive_union,
     "BitmapAnd": explain_bitmap_and,
     "BitmapOr": explain_bitmap_or,
     "Nested Loop": None,
@@ -535,8 +572,8 @@ class Connection():
                     explanation += f"\n<b>Comments</b>: {params[2]}"
                 elif cost != expected_cost:
                     diff = trunc(abs(full_cost - expected_cost))
-                    if diff <= 0.01:
-                        explanation += f"\n<b>Comments</b>: Calculated cost is off by 0.01. The actual difference is around {diff:.4f}, which is most likely a rounding error."
+                    if diff <= 0.05:
+                        explanation += f"\n<b>Comments</b>: Calculated cost is off by {diff:.4f}, which is most likely a rounding error."
                 return explanation
             except Exception as e:
                 return f"<b>Comment</b>: Encountered an error when generating an explanation. {str(e)}"
