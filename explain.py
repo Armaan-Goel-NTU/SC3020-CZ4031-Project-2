@@ -487,6 +487,10 @@ def explain_recursive_union(node: dict) -> str:
 
     return (total_cost, explanation)
 
+def explain_hash(node: dict) -> str:
+    explanation = f"The hash operator incurs no additional cost as it builds a hash table in memory.\n"
+    return (node["Plans"][0]["Total Cost"], explanation)
+
 fn_dict = {
     "Result": explain_result,
     "ProjectSet": explain_project_set,
@@ -529,7 +533,7 @@ fn_dict = {
     "SetOp": explain_setop,
     "LockRows": explain_lockrows,
     "Limit": explain_limit,
-    "Hash": None
+    "Hash": explain_hash,
 }
 
 class Connection():
