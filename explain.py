@@ -491,6 +491,19 @@ def explain_hash(node: dict) -> str:
     explanation = f"The hash operator incurs no additional cost as it builds a hash table in memory.\n"
     return (node["Plans"][0]["Total Cost"], explanation)
 
+def explain_aggregate(node: dict) -> str: #not done, no of workers not accounted
+    cpu_operator_cost = float(cache.get_setting("cpu_operator_cost"))
+    cpu_tuple_cost = float(cache.get_setting("cpu_tuple_cost"))
+    child = node["Plans"][0]
+    tuples = node["Plan Rows"]
+    startup_cost = child["Total Cost"] + (cpu_operator_cost * child["Plan Rows"])
+    explanation = f"The Aggregate's startup cost consists of cost of child operator and \
+    the cpu_operator_cost ({cpu_operator_cost}) multipled by number of input rows\n"
+    explanation += f"The Aggregate's total cost is then increased by cpu_tuple_cost ({cpu_tuple_cost}), \
+    for processing every resulting output row"
+    total_cost = startup_cost + cpu_tuple_cost * tuples
+    return (total_cost, explanation)
+
 fn_dict = {
     "Result": explain_result,
     "ProjectSet": explain_project_set,
@@ -527,7 +540,7 @@ fn_dict = {
     "Sort": explain_sort,
     "Incremental Sort": None,
     "Group": explain_group,
-    "Aggregate": None,
+    "Aggregate": explain_aggregate,
     "WindowAgg": None,
     "Unique": None,
     "SetOp": explain_setop,
