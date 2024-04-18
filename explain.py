@@ -487,6 +487,10 @@ def explain_recursive_union(node: dict) -> str:
 
     return (total_cost, explanation)
 
+def explain_hash(node: dict) -> str:
+    explanation = f"The hash operator incurs no additional cost as it builds a hash table in memory.\n"
+    return (node["Plans"][0]["Total Cost"], explanation)
+
 def explain_aggregate(node: dict) -> str: #not done, no of workers not accounted
     cpu_operator_cost = float(cache.get_setting("cpu_operator_cost"))
     cpu_tuple_cost = float(cache.get_setting("cpu_tuple_cost"))
@@ -542,7 +546,7 @@ fn_dict = {
     "SetOp": explain_setop,
     "LockRows": explain_lockrows,
     "Limit": explain_limit,
-    "Hash": None
+    "Hash": explain_hash,
 }
 
 class Connection():
