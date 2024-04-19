@@ -494,6 +494,31 @@ def explain_hash(node: dict) -> str:
 def explain_aggregate(node: dict) -> str: #not done, no of workers not accounted
     cpu_operator_cost = float(cache.get_setting("cpu_operator_cost"))
     cpu_tuple_cost = float(cache.get_setting("cpu_tuple_cost"))
+    child_cost = node["Plans"][0]["Total Cost"]
+    child_tuples = node["Plans"][0]["Plan Rows"]
+    strategy = node["Strategy"]
+    total_cost = child_cost
+    if strategy == "Plain":
+        explanation = f"In Plain Aggregation, there is no grouping involved.\n"
+        explanation += f"The startup cost is the total cost of the child node.\n"
+        explanation += f"cpu_tuple_cost ({cpu_tuple_cost} is added to the the total cost.\n"
+        return (total_cost + cpu_tuple_cost, explanation)
+    elif strategy == "Sorted" or strategy == "Mixed":
+        numGroupCols = len(node["Group Key"])
+        total_cost += cpu_operator_cost * numGroupCols * child_tuples
+        total_cost += cpu_tuple_cost * node["Plan Rows"]
+        explanation = f"When sorting, no additional startup cost is incurred.\n"
+        explanation += f"cpu_operator_cost ({cpu_operator_cost}) * length of grouping keys ({numGroupCols}) is charged for each input tuple\n"
+        explanation += f"cpu_tuple_cost ({cpu_tuple_cost}) is charged for each output tuple"
+        
+        if strategy == "Sorted":
+            return (total_cost, explanation)
+    else:
+        total_cost += cpu_operator_cost * numGroupCols * child_tuples
+        total_cost += cpu_tuple_cost * node["Plan Rows"]
+        explanation = f"When hashing, cpu_operator_cost ({cpu_operator_cost}) * length of grouping keys ({numGroupCols}) is charged for each input tuple during startup. This represents the cost of the hash computation.\n"
+        explanation += f"cpu_tuple_cost ({cpu_tuple_cost}) is charged for each output tuple"
+
     child = node["Plans"][0]
     tuples = node["Plan Rows"]
     startup_cost = child["Total Cost"] + (cpu_operator_cost * child["Plan Rows"])
@@ -520,7 +545,7 @@ fn_dict = {
     "Sample Scan": None,
     "Gather": explain_gather,
     "Gather Merge": explain_gather_merge,
-    "Index Scan": explain_indexscan,
+    "Index Scan": None,
     "Index Only Scan": None,
     "Bitmap Index Scan": None,
     "Bitmap Heap Scan": None,
