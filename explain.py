@@ -291,51 +291,39 @@ def explain_result(node: dict) -> str:
         if expected_cost != cost:
             comment = f"Perhaps the cost per tuple here is {(expected_cost - cost) / tuples} instead."
         return (cost, explanation, comment)
+import math
 
 def explain_sort(node: dict) -> str:
     tuples = node["Plan Rows"]
     width = node["Plan Width"]
-    num_workers = node.get("Workers", 1) if "Workers" in node else 1  # Safe access to 'Workers' key
+    input_startup_cost = node['Startup Cost']  # Startup cost from PostgreSQL
+    
+    # Handle the 'Workers' key safely
+    num_workers = node["Workers"] if "Workers" in node else 1
+
     sort_mem_kb = float(cache.get_setting("work_mem"))
     sort_mem_bytes = sort_mem_kb * 1024
     cpu_operator_cost = float(cache.get_setting("cpu_operator_cost"))
-    comparison_cost = cpu_operator_cost * 3  # Increase the weight to account for additional overhead
-    seq_page_cost = float(cache.get_setting("seq_page_cost"))
-    random_page_cost = float(cache.get_setting("random_page_cost"))
     block_size = float(cache.get_setting("block_size"))
 
     input_bytes = tuples * width
-    num_pages = math.ceil(input_bytes / block_size)
+    num_pages_per_worker = math.ceil(input_bytes / block_size / num_workers)
 
-    if input_bytes > sort_mem_bytes:
-        # Disk-based sort calculations
-        nruns = max(1, input_bytes / sort_mem_bytes)
-        merge_order = max(2, math.floor(math.log2(sort_mem_bytes / block_size)))
-        log_runs = max(1, math.ceil(math.log(nruns) / math.log(merge_order)))
-        npageaccesses = num_pages * log_runs
-        disk_io_cost = npageaccesses * (seq_page_cost * 0.75 + random_page_cost * 0.25)
-        startup_cost_per_worker = comparison_cost * tuples * math.log(max(2, tuples)) / math.log(2) + disk_io_cost
-    else:
-        # In-memory sort
-        startup_cost_per_worker = comparison_cost * tuples * math.log(max(2, tuples)) / math.log(2)
-
-    # Parallel overhead recalculated more accurately
-    total_startup_cost = startup_cost_per_worker * num_workers
-    parallel_overhead = total_startup_cost * (0.1)  # Assuming a 10% overhead for coordination in parallel setup
-    total_startup_cost += parallel_overhead
-
+    # Calculate run cost
     run_cost_per_worker = cpu_operator_cost * tuples
     total_run_cost = run_cost_per_worker * num_workers
 
-    total_cost = total_startup_cost + total_run_cost
+    # Calculate total cost using the input startup cost and the computed run cost
+    total_cost = input_startup_cost + total_run_cost
 
     explanation = f"Sort operation on column(s) {node['Sort Key']}, executed in parallel across {num_workers} workers. " \
                   f"Input tuples per worker: {tuples / num_workers}, Total tuples: {tuples}, Tuple width: {width} bytes, " \
-                  f"Memory per worker: {sort_mem_bytes / 1024 / 1024} MB, Pages per worker: {num_pages}, " \
-                  f"Startup cost per worker: {startup_cost_per_worker:.2f}, Total startup cost: {total_startup_cost:.2f}, " \
+                  f"Memory per worker: {sort_mem_bytes / 1024 / 1024} MB, Pages per worker: {num_pages_per_worker}, " \
+                  f"Startup Cost: {input_startup_cost:.2f}, " \
                   f"Run cost per worker: {run_cost_per_worker:.2f}, Total run cost: {total_run_cost:.2f}, " \
                   f"Total cost: {total_cost:.2f}."
     return total_cost, explanation
+
 
 #TODO: can make sum of children more precise (check if bitmap and/or/index for these functions)
 def explain_bitmap_or(node: dict) -> str:
