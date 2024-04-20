@@ -866,6 +866,17 @@ def explain_memoize(node: dict):
     return (node["Plans"][0]["Total Cost"] + 0.01, explanation)
 
 fn_dict = {
+    "Nested Loop": None,
+    "Merge Join": None,
+    "Hash Join": None,
+    "Index Scan": None,
+    "Index Only Scan": None,
+    "Bitmap Index Scan": None,
+    "Bitmap Heap Scan": None,
+    "Incremental Sort": None,
+    "Aggregate": None,
+    "WindowAgg": None,
+
     "Result": explain_result,
     "ProjectSet": explain_project_set,
     "ModifyTable": explain_modify_table,
@@ -874,17 +885,10 @@ fn_dict = {
     "Recursive Union": explain_recursive_union,
     "BitmapAnd": explain_bitmap_and,
     "BitmapOr": explain_bitmap_or,
-    "Nested Loop": explain_nestedloop,
-    "Merge Join": None,
-    "Hash Join": explain_hash_join,
     "Seq Scan": explain_seqscan,
     "Sample Scan": explain_samplescan,
     "Gather": explain_gather,
     "Gather Merge": explain_gather_merge,
-    "Index Scan": None,
-    "Index Only Scan": None,
-    "Bitmap Index Scan": None,
-    "Bitmap Heap Scan": None,
     "Tid Scan": explain_tidscan,
     "Tid Range Scan": explain_tidrangescan,
     "Subquery Scan": explain_subqueryscan,
@@ -894,20 +898,19 @@ fn_dict = {
     "CTE Scan": explain_cte,
     "Named Tuplestore Scan": explain_namedtuplestorescan,
     "WorkTable Scan": explain_cte,
-    "Foreign Scan": None,
-    "Custom Scan": None,
     "Materialize": explain_materialize,
     "Memoize": explain_memoize,
     "Sort": explain_sort,
-    "Incremental Sort": None,
     "Group": explain_group,
-    "Aggregate": explain_aggregate,
-    "WindowAgg": None,
     "Unique": explain_unique,
     "SetOp": explain_setop,
     "LockRows": explain_lockrows,
     "Limit": explain_limit,
     "Hash": explain_hash,
+
+    # not worth it
+    "Foreign Scan": None,
+    "Custom Scan": None,
 }
 
 class Connection():
