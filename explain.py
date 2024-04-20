@@ -492,8 +492,9 @@ def explain_hash(node: dict) -> str:
 def explain_aggregate(node: dict) -> str: #not done, no of workers not accounted
     cpu_operator_cost = float(cache.get_setting("cpu_operator_cost"))
     cpu_tuple_cost = float(cache.get_setting("cpu_tuple_cost"))
-    child_cost = node["Plans"][0]["Total Cost"]
-    child_tuples = node["Plans"][0]["Plan Rows"]
+    child = node["Plans"][0]
+    child_cost = child["Total Cost"]
+    child_tuples = child["Plan Rows"]
     strategy = node["Strategy"]
     total_cost = child_cost
     if strategy == "Plain":
@@ -502,7 +503,7 @@ def explain_aggregate(node: dict) -> str: #not done, no of workers not accounted
         explanation += f"cpu_tuple_cost ({cpu_tuple_cost} is added to the the total cost.\n"
         return (total_cost + cpu_tuple_cost, explanation)
     elif strategy == "Sorted" or strategy == "Mixed":
-        numGroupCols = len(node["Group Key"])
+        numGroupCols = len(clean_output(node["Output"]))
         total_cost += cpu_operator_cost * numGroupCols * child_tuples
         total_cost += cpu_tuple_cost * node["Plan Rows"]
         explanation = f"When sorting, no additional startup cost is incurred.\n"
@@ -677,6 +678,34 @@ def explain_unique(node: dict):
 
     return (sub_cost + total_cost, explanation)
 
+def explain_cte(node : dict):
+    cpu_tuple_cost = float(cache.get_setting("cpu_tuple_cost")) 
+    cost_per_tuple = cpu_tuple_cost * 2
+    explanation = f"WorkTable/CTE Scan charges 2 * cpu_tuple_cost ({cpu_tuple_cost}) per tuple.\n"
+    base_cost = 0
+    rows = node["Plan Rows"]
+    if "Plans" in node:
+        rows = node["Plans"][0]["Plan Rows"]
+        base_cost = node["Plans"][0]["Total Cost"]
+    if "Filter" in node:
+        pattern = r"\([^()]*\)"
+        filters = len(re.findall(pattern, node["Filter"]))
+        cpu_operator_cost = float(cache.get_setting("cpu_operator_cost"))
+        filter_cost = filters * cpu_operator_cost
+        cost_per_tuple += filter_cost
+        explanation += f"CPU cost per tuple is increased by {filter_cost:.4f} for {filters} filters * cpu_operator_cost ({cpu_operator_cost})\n"
+
+    total_cost = rows * cost_per_tuple
+    explanation += f"The cost per tuple is {cost_per_tuple}. For {rows} row(s), the total cost is {total_cost}"
+
+    expected_cost = node["Total Cost"]
+    if truncate_cost(base_cost + total_cost) != expected_cost:
+        comment = "The given plan row count by PostgresSQL is not the same as the input tuples.\n"
+        comment += "We cannot get the actual tuple count for a WorkTable/CTE\n"
+        comment += f"If the estimated cost per tuple is right, there should have been {int(expected_cost/cost_per_tuple)} input tuples."
+    
+    return (base_cost + total_cost, explanation, comment)
+
 fn_dict = {
     "Result": explain_result,
     "ProjectSet": explain_project_set,
@@ -703,9 +732,9 @@ fn_dict = {
     "Function Scan": None,
     "Table Function Scan": None,
     "Values Scan": explain_valuescan,
-    "CTE Scan": None,
+    "CTE Scan": explain_cte,
     "Named Tuplestore Scan": None,
-    "WorkTable Scan": None,
+    "WorkTable Scan": explain_cte,
     "Foreign Scan": None,
     "Custom Scan": None,
     "Materialize": explain_materialize,
