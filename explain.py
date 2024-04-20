@@ -553,6 +553,108 @@ def explain_nestedloop(node: dict) -> str: #total cost is wrong
     return startup_cost + run_cost, explanation
 
 
+def explain_hash_join(node: dict) -> str:
+    # Configuration settings
+    cpu_operator_cost = float(cache.get_setting("cpu_operator_cost"))
+    cpu_tuple_cost = float(cache.get_setting("cpu_tuple_cost"))
+    seq_page_cost = float(cache.get_setting("seq_page_cost"))
+    work_mem = float(cache.get_setting("work_mem")) * 1024 * 1024  # Convert MB to bytes
+    block_size = float(cache.get_setting("block_size"))
+
+    # Extracting plan information
+    outer_path = node["Plans"][0]
+    inner_path = node["Plans"][1]
+    outer_path_rows = outer_path["Plan Rows"]
+    inner_path_rows = inner_path["Plan Rows"]
+
+    # Default tuple sizes (or retrieve from settings)
+    inner_tuple_size = inner_path.get("Plan Width", 50)
+    outer_tuple_size = outer_path.get("Plan Width", 50)
+
+    # Memory and batch calculations
+    total_inner_size = inner_path_rows * inner_tuple_size
+    inner_pages = total_inner_size / block_size
+    numbatches = max(1, total_inner_size / work_mem)
+
+    # Hash function computation costs
+    hash_cost_per_tuple = cpu_operator_cost * 2
+    total_hash_cost = hash_cost_per_tuple * (inner_path_rows + outer_path_rows)
+
+    # I/O cost for batches
+    if numbatches > 1:
+        io_cost = (seq_page_cost * inner_pages * 2) * numbatches  # Read/write each batch
+        total_hash_cost += io_cost
+
+    # Run cost adjusted for tuple comparisons and hash evaluations
+    run_cost = total_hash_cost + (cpu_tuple_cost * outer_path_rows * (inner_path_rows / numbatches))
+
+    # Startup cost directly from the node
+    startup_cost = node.get('Startup Cost', 1.56)
+
+    # Total cost calculation
+    total_cost = startup_cost + run_cost
+
+    # Constructing the explanation
+    explanation = f"Hash Join Cost Estimation:\n" \
+                  f"Join Type: Inner\n" \
+                  f"Outer Rows: {outer_path_rows}, Inner Rows: {inner_path_rows}\n" \
+                  f"Startup Cost: {startup_cost:.2f}\n" \
+                  f"Run Cost: {run_cost:.2f}, Number of Batches: {numbatches}\n" \
+                  f"Total Cost: {total_cost:.2f}\n"
+
+    return total_cost, explanation
+
+
+
+# def explain_hash_join(node: dict) -> str:
+#     cpu_operator_cost = float(cache.get_setting("cpu_operator_cost"))
+#     cpu_tuple_cost = float(cache.get_setting("cpu_tuple_cost"))
+#     seq_page_cost = float(cache.get_setting("seq_page_cost"))
+#     block_size = float(cache.get_setting("block_size"))
+    
+#     outer_path = node["Plans"][0]
+#     inner_path = node["Plans"][1]
+#     outer_path_rows = outer_path["Plan Rows"]
+#     inner_path_rows = inner_path["Plan Rows"]
+
+#     # Assuming startup cost is given:
+#     input_startup_cost = node['Startup Cost']
+
+#     # Calculate run cost:
+#     run_cost = 0
+
+#     # Compute cost of hashing all tuples in the inner relation
+#     # Assuming one cpu_operator_cost per tuple for hashing
+#     run_cost += (cpu_operator_cost + cpu_tuple_cost) * inner_path_rows
+
+#     # Compute cost of processing each outer tuple
+#     # Assuming a match needs to check each outer tuple against hash table entries
+#     run_cost += cpu_operator_cost * outer_path_rows
+
+#     # If batching is necessary due to memory constraints
+#     estimated_inner_size = inner_path_rows * inner_path.get("Plan Width", 100)  # Default width
+#     inner_pages = estimated_inner_size / block_size
+
+#     work_mem = float(cache.get_setting("work_mem")) * 1024 * 1024  # Convert MB to bytes
+#     if estimated_inner_size > work_mem:
+#         # If more than one batch is needed, add cost of writing/reading batches to/from disk
+#         numbatches = max(1, estimated_inner_size / work_mem)
+#         run_cost += seq_page_cost * inner_pages * numbatches
+
+#     total_cost = input_startup_cost + run_cost
+
+#     # Prepare the explanation
+#     explanation = f"Hash Join Cost Estimation:\n"
+#     explanation += f"Outer Rows: {outer_path_rows}, Inner Rows: {inner_path_rows}\n"
+#     explanation += f"Startup Cost: {input_startup_cost:.2f}\n"
+#     explanation += f"Run Cost: {run_cost:.2f}\n"
+#     explanation += f"Total Cost: {total_cost:.2f}\n"
+#     explanation += f"- Run cost includes the cost of hashing inner tuples and checking outer tuples against hash table\n"
+#     explanation += f"- Additional cost for handling batches if memory constraints require disk-based operations\n"
+
+#     return total_cost, explanation
+
+
 
 fn_dict = {
     "Result": explain_result,
@@ -565,7 +667,7 @@ fn_dict = {
     "BitmapOr": explain_bitmap_or,
     "Nested Loop": explain_nestedloop,
     "Merge Join": None,
-    "Hash Join": None,
+    "Hash Join": explain_hash_join,
     "Seq Scan": explain_seqscan,
     "Sample Scan": None,
     "Gather": explain_gather,
