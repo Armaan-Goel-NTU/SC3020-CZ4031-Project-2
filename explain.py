@@ -51,6 +51,13 @@ class Cache():
         key = f"reltuples/{relation}"
         self.dict[key] = count
 
+def count_clauses(condition: str):
+    or_count = condition.count(') OR (')
+    and_count = condition.count(') AND (')
+    total_count = or_count + and_count + 1 
+    
+    return total_count
+
 def explain_seqscan(node: dict) -> str:
     cpu_tuple_cost = float(cache.get_setting("cpu_tuple_cost"))
     seq_page_cost = float(cache.get_setting("seq_page_cost"))
@@ -703,7 +710,7 @@ def explain_cte(node : dict):
     if truncate_cost(base_cost + total_cost) != expected_cost:
         comment = "The given plan row count by PostgresSQL is not the same as the input tuples.\n"
         comment += "We cannot get the actual tuple count for a WorkTable/CTE\n"
-        comment += f"If the estimated cost per tuple is right, there should have been {int(expected_cost/cost_per_tuple)} input tuples."
+        comment += f"If the estimated cost per tuple is right, there should have been {round(expected_cost/cost_per_tuple)} input tuples."
     
     return (base_cost + total_cost, explanation, comment)
 
@@ -732,6 +739,37 @@ def explain_tablefunctionscan(node: dict):
 def explain_namedtuplestorescan(node: dict):
     return explain_xyz_scan(node, "Named Tuplestore Scan")
 
+def explain_tidscan(node: dict):
+    cpu_operator_cost = float(cache.get_setting("cpu_operator_cost")) 
+    cpu_tuple_cost = float(cache.get_setting("cpu_tuple_cost")) 
+    random_page_cost = float(cache.get_setting("random_page_cost")) 
+    comment = ""
+
+    tid_filters = count_clauses(node["TID Cond"])
+    table_filters = count_clauses(node["Filter"]) if "Filter" in node else 0
+
+    explanation = f"TID Scan charges cpu_operator_cost ({cpu_operator_cost}) for every TID filter at startup ({tid_filters}).\n"
+    startup_cost = cpu_operator_cost * tid_filters
+    tuples = node["Plan Rows"]
+
+    cpu_per_tuple = cpu_tuple_cost + random_page_cost + (table_filters * cpu_operator_cost)
+    total_cost = cpu_per_tuple * tuples
+
+    explanation += f"TID Scan assumes each tuple is on a random page, so we charge random_page_cost ({random_page_cost}) per tuple."
+    explanation += f"cpu_tuple_cost ({cpu_tuple_cost}) is also incurred per tuple." 
+    explanation += f"TID scan also charges cpu_operator_cost ({cpu_operator_cost}) for {table_filters} filters per tuple." 
+    explanation += f"For {tuples} tuples, this cost comes out to be {total_cost:.4f}."
+
+    expected_cost = node["Total Cost"]
+
+    if truncate_cost(total_cost + startup_cost) != expected_cost:
+        expected_cost -= node["Startup Cost"]
+        comment = f"The difference can arise from the actual number of tuples scanned (since we only get the output rows) or the filtering cost.\n"
+        comment += f"If the filtering cost is correct, the actual number of rows is {round(expected_cost/cpu_per_tuple)}\n"
+        comment += f"If the number of rows is correct, the actual filtering cost is {(expected_cost/tuples):.4f}\n"
+
+    return (startup_cost + total_cost, explanation, comment)
+
 fn_dict = {
     "Result": explain_result,
     "ProjectSet": explain_project_set,
@@ -752,7 +790,7 @@ fn_dict = {
     "Index Only Scan": None,
     "Bitmap Index Scan": None,
     "Bitmap Heap Scan": None,
-    "Tid Scan": None,
+    "Tid Scan": explain_tidscan,
     "Tid Range Scan": None,
     "Subquery Scan": explain_subqueryscan,
     "Function Scan": explain_functionscan,
