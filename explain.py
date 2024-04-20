@@ -570,6 +570,43 @@ def explain_nestedloop(node: dict) -> str: #total cost is wrong
     return startup_cost + run_cost, explanation
 
 
+def get_m():
+    return float(cache.get_setting('work_mem')) * 1024 / float(cache.get_setting('block_size'))
+
+def explain_nestedlooplect(node: dict) -> str: #total cost is wrong
+    seq_page_cost = float(cache.get_setting("seq_page_cost"))
+    outer_path = node["Plans"][0]
+    inner_path = node["Plans"][1]
+    outer_path_rows = outer_path["Plan Rows"]
+    inner_path_rows = inner_path["Plan Rows"]
+    inputbuffers = get_m()
+    cpu_block_size = float(cache.get_setting('block_size'))
+                           
+    # Calculate the startup and run costs
+    startup_cost = 0
+    run_cost = 0
+
+    # Startup cost includes the startup cost of both outer and inner paths
+    startup_cost += outer_path["Startup Cost"] + inner_path["Startup Cost"]
+
+    # Calculate the run cost of the inner relation excluding startup cost
+    outer_blocks = outer_path_rows * outer_path["Plan Width"] / cpu_block_size
+    inner_blocks = inner_path_rows * inner_path["Plan Width"] / cpu_block_size
+    blocks_accessed = outer_blocks + ((outer_blocks * inner_blocks) / (inputbuffers - 1))
+    run_cost += blocks_accessed * seq_page_cost
+
+
+    # Prepare explanation
+    explanation = f"The startup and total costs for the Nested Loop join are as follows:\n"
+    explanation += f"Startup cost: {startup_cost}\n"
+    explanation += f"Total cost is the startup cost and run cost{startup_cost + run_cost}\n"
+    explanation += f"- Startup cost includes the startup cost of both outer and inner paths\n"
+    explanation += f"- Following the formula of B(S) + B(S)B(M)/(M-1)\n"
+    explanation += f"- B(outerloop) = {outer_blocks}, B(innerloop) = {inner_blocks}, and M = {inputbuffers}\n"
+    explanation += f"- The run cost will be the seq_page_cost({seq_page_cost}) of accessing all the blocks"
+    return startup_cost + run_cost, explanation
+
+
 def explain_hash_join(node: dict) -> str:
     # Configuration settings
     cpu_operator_cost = float(cache.get_setting("cpu_operator_cost"))
