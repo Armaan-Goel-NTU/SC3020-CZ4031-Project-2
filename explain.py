@@ -858,6 +858,13 @@ def explain_samplescan(node: dict):
 
     return (total_cost, explanation, comment)    
 
+def explain_memoize(node: dict):
+    cpu_tuple_cost = float(cache.get_setting("cpu_tuple_cost"))
+    explanation = f"Postgres charges cpu_tuple_cost ({cpu_tuple_cost}) at startup (and subsequently total cost) as the cost to cache the first entry.\n"
+    explanation += f"The actual cost of rescanning and caching during the many loops of a Nested Join is calculated by the Nested Loop operator.\n"
+
+    return (node["Plans"][0]["Total Cost"] + 0.01, explanation)
+
 fn_dict = {
     "Result": explain_result,
     "ProjectSet": explain_project_set,
@@ -890,7 +897,7 @@ fn_dict = {
     "Foreign Scan": None,
     "Custom Scan": None,
     "Materialize": explain_materialize,
-    "Memoize": None,
+    "Memoize": explain_memoize,
     "Sort": explain_sort,
     "Incremental Sort": None,
     "Group": explain_group,
