@@ -302,7 +302,6 @@ def explain_result(node: dict) -> str:
         if expected_cost != cost:
             comment = f"Perhaps the cost per tuple here is {(expected_cost - cost) / tuples} instead."
         return (cost, explanation, comment)
-import math
 
 def explain_sort(node: dict) -> str:
     tuples = node["Plan Rows"]
@@ -810,11 +809,54 @@ def explain_tidrangescan(node: dict):
         while e_cost < expected_cost:
             e_cost = random_page_cost + (math.ceil(x/reltuples * relpages) - 1) * seq_page_cost + cpu_per_tuple * x
             x += 1
-            
+
         comment += f"If the filtering cost is correct, the actual number of rows is {x-1}\n"
         comment += f"If the number of rows is correct, the actual cost per tuple is {((expected_cost - disk_cost)/tuples):.4f}\n"
 
     return (startup_cost + total_cost, explanation, comment)
+
+def explain_samplescan(node: dict):
+    relpages = cache.get_page_count(node["Relation Name"])
+    reltuples = cache.get_tuple_count(node["Relation Name"])
+    cpu_operator_cost = float(cache.get_setting("cpu_operator_cost"))
+    cpu_tuple_cost = float(cache.get_setting("cpu_tuple_cost"))
+    seq_page_cost = float(cache.get_setting("seq_page_cost"))
+    random_page_cost = float(cache.get_setting("random_page_cost"))
+
+    method = node["Sampling Method"]
+    if method != "bernoulli" and method != "system":
+        return (0, "", "I am unaware of this sampling method. (bernoulli & system only)")
+    
+    rate = float(node["Sampling Parameters"][0].split("'")[1])
+    tuples = round(reltuples * rate/100)
+    explanation = f"N = {relpages}. S = {rate}.\n"
+    comment = ""
+    
+    if method == "bernoulli":
+        explanation = f"For Bernoulli Sampling, all pages are sequentially scanned ({relpages}). seq_scan_cost is {seq_page_cost} per page.\n"
+        page_cost = relpages * seq_page_cost
+    else:
+        explanation = f"For System Sampling, (N * S/100) pages are scanned ({round(relpages * rate/100)}). random_page_cost is {random_page_cost} per page.\n"
+        page_cost = round(relpages * rate/100) * random_page_cost
+
+    cpu_per_tuple = cpu_tuple_cost
+    explanation += f"(N * S/100) = {tuples} tuples will be scanned.\n"
+    explanation += f"cpu_tuple_cost {cpu_tuple_cost} is charged for each scanned tuple.\n"
+
+    if "Filter" in node:
+        num_filters = count_clauses(node["Filter"])
+        cpu_per_tuple += cpu_operator_cost * num_filters
+        explanation += f"For filtering, cpu_operator_cost ({cpu_operator_cost}) is applied for each filter ({num_filters} per tuple.\n"
+    
+    total_cost = page_cost + cpu_per_tuple * tuples
+    explanation += f"This gives the total cost as {total_cost}."
+
+    expected_cost = node["Total Cost"]
+    if truncate_cost(total_cost) != expected_cost:
+        comment = "The cost per tuple is most likely incorrect. This could be due to incorrect functions/filtering cost.\n"
+        comment += f"It should be {((expected_cost - page_cost) / tuples):.4f} instead of {cpu_per_tuple}"
+
+    return (total_cost, explanation, comment)    
 
 fn_dict = {
     "Result": explain_result,
@@ -829,7 +871,7 @@ fn_dict = {
     "Merge Join": None,
     "Hash Join": explain_hash_join,
     "Seq Scan": explain_seqscan,
-    "Sample Scan": None,
+    "Sample Scan": explain_samplescan,
     "Gather": explain_gather,
     "Gather Merge": explain_gather_merge,
     "Index Scan": None,
