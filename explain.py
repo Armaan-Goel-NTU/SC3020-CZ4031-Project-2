@@ -599,7 +599,7 @@ def explain_nestedlooplect(node: dict) -> str: #total cost is wrong
     # Prepare explanation
     explanation = f"The startup and total costs for the Nested Loop join are as follows:\n"
     explanation += f"Startup cost: {startup_cost}\n"
-    explanation += f"Total cost is the startup cost and run cost{startup_cost + run_cost}\n"
+    explanation += f"Total cost is the startup cost and run cost: {startup_cost + run_cost}\n"
     explanation += f"- Startup cost includes the startup cost of both outer and inner paths\n"
     explanation += f"- Following the formula of B(S) + B(S)B(M)/(M-1)\n"
     explanation += f"- B(outerloop) = {outer_blocks}, B(innerloop) = {inner_blocks}, and M = {inputbuffers}\n"
@@ -927,7 +927,7 @@ def explain_windowagg(node: dict):
     return (total_cost + child_cost, explanation, comment)
 
 fn_dict = {
-    "Nested Loop": None,
+    "Nested Loop": explain_nestedlooplect,
     "Merge Join": None,
     "Hash Join": None,
     "Index Scan": None,
