@@ -766,7 +766,53 @@ def explain_tidscan(node: dict):
         expected_cost -= node["Startup Cost"]
         comment = f"The difference can arise from the actual number of tuples scanned (since we only get the output rows) or the filtering cost.\n"
         comment += f"If the filtering cost is correct, the actual number of rows is {round(expected_cost/cpu_per_tuple)}\n"
-        comment += f"If the number of rows is correct, the actual filtering cost is {(expected_cost/tuples):.4f}\n"
+        comment += f"If the number of rows is correct, the actual cost per tuple is {(expected_cost/tuples):.4f}\n"
+
+    return (startup_cost + total_cost, explanation, comment)
+
+def explain_tidrangescan(node: dict):
+    cpu_operator_cost = float(cache.get_setting("cpu_operator_cost")) 
+    cpu_tuple_cost = float(cache.get_setting("cpu_tuple_cost")) 
+    random_page_cost = float(cache.get_setting("random_page_cost")) 
+    seq_page_cost = float(cache.get_setting("seq_page_cost"))
+    reltuples = cache.get_tuple_count(node["Relation Name"])
+    relpages = cache.get_page_count(node["Relation Name"])
+    comment = ""
+
+    tid_filters = count_clauses(node["TID Cond"])
+    table_filters = count_clauses(node["Filter"]) if "Filter" in node else 0
+
+    explanation = f"TID Scan charges cpu_operator_cost ({cpu_operator_cost}) for every TID filter at startup ({tid_filters}).\n"
+    startup_cost = cpu_operator_cost * tid_filters
+    tuples = node["Plan Rows"]
+    selectivity = tuples/reltuples
+    pages = math.ceil(selectivity * relpages)
+    seq_pages = pages - 1
+
+    disk_cost = random_page_cost + seq_pages * seq_page_cost
+    total_cost = disk_cost
+    cpu_per_tuple = cpu_tuple_cost + (table_filters * cpu_operator_cost)
+    total_cost += cpu_per_tuple * tuples
+
+    explanation += f"TID Range Scan charges random_page_cost ({random_page_cost}) for the first page and then seq_page_cost ({seq_page_cost}) for the remaining. We have assumed {pages} pages.\n"
+    explanation += f"cpu_tuple_cost ({cpu_tuple_cost}) is also incurred per tuple.\n" 
+    explanation += f"TID Range scan also charges cpu_operator_cost ({cpu_operator_cost}) for {table_filters} filters per tuple.\n" 
+    explanation += f"For {tuples} tuples, this cost comes out to be {total_cost:.4f}."
+
+    expected_cost = node["Total Cost"]
+
+    if truncate_cost(total_cost + startup_cost) != expected_cost:
+        expected_cost -= node["Startup Cost"]
+        comment = f"The difference can arise from the actual number of tuples scanned (since we only get the output rows) or the filtering cost.\n"
+        
+        e_cost = 0
+        x = 1
+        while e_cost < expected_cost:
+            e_cost = random_page_cost + (math.ceil(x/reltuples * relpages) - 1) * seq_page_cost + cpu_per_tuple * x
+            x += 1
+            
+        comment += f"If the filtering cost is correct, the actual number of rows is {x-1}\n"
+        comment += f"If the number of rows is correct, the actual cost per tuple is {((expected_cost - disk_cost)/tuples):.4f}\n"
 
     return (startup_cost + total_cost, explanation, comment)
 
@@ -791,7 +837,7 @@ fn_dict = {
     "Bitmap Index Scan": None,
     "Bitmap Heap Scan": None,
     "Tid Scan": explain_tidscan,
-    "Tid Range Scan": None,
+    "Tid Range Scan": explain_tidrangescan,
     "Subquery Scan": explain_subqueryscan,
     "Function Scan": explain_functionscan,
     "Table Function Scan": explain_tablefunctionscan,
