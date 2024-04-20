@@ -79,14 +79,14 @@ def explain_seqscan(node: dict) -> str:
     disk_cost = seq_page_cost * page_count
     cost = truncate_cost((cpu_tuple_cost + filter_cost)/workers * row_count + disk_cost)
     expected_cost = node["Total Cost"]
-    if cost != expected_cost and "Filter" in node:
+    if cost != expected_cost:
         expected_cost -= disk_cost
         expected_cost /= row_count
         expected_cost *= workers
         expected_cost -= cpu_tuple_cost
 
         if expected_cost != filter_cost:
-            comment = f"The difference in costs is likely due to the way filtering is handled. The expected filtering cost is {expected_cost:.4f}, but we have used {filter_cost}"
+            comment = f"The difference in costs is likely due to the way filtering/functions are handled. The expected filtering/function cost is {expected_cost:.4f}, but we have used {filter_cost}"
 
     explanation += f"Plugging in these values, we get {cost}"
 
@@ -684,6 +684,7 @@ def explain_cte(node : dict):
     explanation = f"WorkTable/CTE Scan charges 2 * cpu_tuple_cost ({cpu_tuple_cost}) per tuple.\n"
     base_cost = 0
     rows = node["Plan Rows"]
+    comment = ""
     if "Plans" in node:
         rows = node["Plans"][0]["Plan Rows"]
         base_cost = node["Plans"][0]["Total Cost"]
@@ -705,6 +706,22 @@ def explain_cte(node : dict):
         comment += f"If the estimated cost per tuple is right, there should have been {int(expected_cost/cost_per_tuple)} input tuples."
     
     return (base_cost + total_cost, explanation, comment)
+
+def explain_functionscan(node: dict):
+    cpu_tuple_cost = float(cache.get_setting("cpu_tuple_cost")) 
+    tuples = node["Plan Rows"]
+    total_cost = tuples * cpu_tuple_cost
+    startup_cost = node["Startup Cost"]
+    expected_cost = node["Total Cost"] - startup_cost
+    comment = ""
+
+    explanation = f"Function Scan charges cpu_tuple_cost ({cpu_tuple_cost}) per tuple ({tuples})."
+
+    if truncate_cost(total_cost) != expected_cost:
+        comment = "Function scan may involve other costs to evaluate expressesions.\n"
+        comment += f"The cost per tuple should have been {expected_cost/tuples}"
+    
+    return (startup_cost + total_cost, explanation, comment)
 
 fn_dict = {
     "Result": explain_result,
@@ -729,7 +746,7 @@ fn_dict = {
     "Tid Scan": None,
     "Tid Range Scan": None,
     "Subquery Scan": explain_subqueryscan,
-    "Function Scan": None,
+    "Function Scan": explain_functionscan,
     "Table Function Scan": None,
     "Values Scan": explain_valuescan,
     "CTE Scan": explain_cte,
