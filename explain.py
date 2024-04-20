@@ -529,6 +529,43 @@ def explain_aggregate(node: dict) -> str: #not done, no of workers not accounted
     total_cost = startup_cost + cpu_tuple_cost * tuples
     return (total_cost, explanation)
 
+def explain_nestedloop(node: dict) -> str: #total cost is wrong
+    cpu_operator_cost = float(cache.get_setting("cpu_operator_cost"))
+    cpu_tuple_cost = float(cache.get_setting("cpu_tuple_cost"))
+    outer_path = node["Plans"][0]
+    inner_path = node["Plans"][1]
+    outer_path_rows = outer_path["Plan Rows"]
+    inner_path_rows = inner_path["Plan Rows"]
+
+    # Calculate the startup and run costs
+    startup_cost = 0
+    run_cost = 0
+
+    # Startup cost includes the startup cost of both outer and inner paths
+    startup_cost += outer_path["Startup Cost"] + inner_path["Startup Cost"]
+
+    # Run cost includes the total cost of the outer path excluding startup cost
+    run_cost += outer_path["Total Cost"] - outer_path["Startup Cost"]
+
+    # Calculate the run cost of the inner relation excluding startup cost
+    inner_run_cost = inner_path["Total Cost"] - inner_path["Startup Cost"]
+    run_cost += inner_run_cost
+
+    run_cost += cpu_tuple_cost * outer_path_rows * inner_path_rows
+    run_cost += cpu_tuple_cost * node["Plan Rows"]
+
+    # Prepare explanation
+    explanation = f"The startup and total costs for the Nested Loop join are as follows:\n"
+    explanation += f"Startup cost: {startup_cost}\n"
+    explanation += f"Total cost: {startup_cost + run_cost}\n"
+    explanation += f"- Startup cost includes the startup cost of both outer and inner paths\n"
+    explanation += f"- Total cost includes the total cost of the outer path excluding startup cost\n"
+    explanation += f"- Total cost also includes the cpu_tuple_cost ({cpu_tuple_cost}) of matching each tuples between outer and inner tuples\n"
+    explanation += f"- Total cost also includes the cpu_tuple_cost ({cpu_tuple_cost}) of processing every resulting output row"
+    return startup_cost + run_cost, explanation
+
+
+
 fn_dict = {
     "Result": explain_result,
     "ProjectSet": explain_project_set,
@@ -538,7 +575,7 @@ fn_dict = {
     "Recursive Union": explain_recursive_union,
     "BitmapAnd": explain_bitmap_and,
     "BitmapOr": explain_bitmap_or,
-    "Nested Loop": None,
+    "Nested Loop": explain_nestedloop,
     "Merge Join": None,
     "Hash Join": None,
     "Seq Scan": explain_seqscan,
