@@ -715,10 +715,10 @@ def explain_functionscan(node: dict):
     expected_cost = node["Total Cost"] - startup_cost
     comment = ""
 
-    explanation = f"Function Scan charges cpu_tuple_cost ({cpu_tuple_cost}) per tuple ({tuples})."
+    explanation = f"Function/Table Function Scan charges cpu_tuple_cost ({cpu_tuple_cost}) per tuple ({tuples})."
 
     if truncate_cost(total_cost) != expected_cost:
-        comment = "Function scan may involve other costs to evaluate expressesions.\n"
+        comment = "Function/Table Function scan may involve other costs to evaluate expressesions.\n"
         comment += f"The cost per tuple should have been {expected_cost/tuples}"
     
     return (startup_cost + total_cost, explanation, comment)
@@ -747,7 +747,7 @@ fn_dict = {
     "Tid Range Scan": None,
     "Subquery Scan": explain_subqueryscan,
     "Function Scan": explain_functionscan,
-    "Table Function Scan": None,
+    "Table Function Scan": explain_functionscan,
     "Values Scan": explain_valuescan,
     "CTE Scan": explain_cte,
     "Named Tuplestore Scan": None,
