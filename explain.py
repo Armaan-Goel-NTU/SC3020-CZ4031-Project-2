@@ -865,6 +865,30 @@ def explain_memoize(node: dict):
 
     return (node["Plans"][0]["Total Cost"] + 0.01, explanation)
 
+def explain_windowagg(node: dict):
+    cpu_operator_cost = float(cache.get_setting("cpu_operator_cost"))
+    cpu_tuple_cost = float(cache.get_setting("cpu_tuple_cost"))
+
+    child = node["Plans"][0]
+    child_cost = child["Total Cost"]
+    input_tuples = child["Plan Rows"]
+
+    explanation = f"There is no additional startup cost for the WindowAgg operator.\n"
+    explanation = f"All cost is applied to the input tuples. We are assuming the minimum cost which is cpu_tuple_cost ({cpu_tuple_cost}) + 2 * cpu_operator_cost {cpu_operator_cost}."
+
+    cpu_per_tuple = cpu_tuple_cost + cpu_operator_cost * 2
+    total_cost = cpu_per_tuple * input_tuples
+
+    comment = ""
+
+    expected_cost = node["Total Cost"] - child_cost
+    if truncate_cost(total_cost) != expected_cost:
+        comment = f"WindowAgg charges cpu_operator_cost for every Parition and Order column. This information is not visible to us.\n"
+        comment += f"There may be additional costs for filtering.\n"
+        comment += f"The cost per tuple should have been {(expected_cost/input_tuples):.4f} instead of the assumed {cpu_per_tuple}."
+
+    return (total_cost + child_cost, explanation, comment)
+
 fn_dict = {
     "Nested Loop": None,
     "Merge Join": None,
@@ -875,7 +899,7 @@ fn_dict = {
     "Bitmap Heap Scan": None,
     "Incremental Sort": None,
     "Aggregate": None,
-    "WindowAgg": None,
+    "WindowAgg": explain_windowagg,
 
     "Result": explain_result,
     "ProjectSet": explain_project_set,
@@ -971,7 +995,7 @@ class Connection():
             cur.execute(f"EXPLAIN (COSTS, VERBOSE, FORMAT JSON) {query}")
         except Exception as e:
             return f"Error: {str(e)}"
-
+        
         plan = cur.fetchall()[0][0][0]['Plan']
         with open("plan.json","w") as f:
             f.write(json.dumps(plan, indent=2))
