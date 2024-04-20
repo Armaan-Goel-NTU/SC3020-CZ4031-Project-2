@@ -3,9 +3,13 @@ import psycopg
 import json
 import re
 import math
+import decimal
 
-def trunc(a : float) -> float:
+def truncate_cost(a : float) -> float:
     return round(a, 2)
+
+def truncate(a : float) -> float:
+    return float(decimal.Decimal(str(a)).quantize(decimal.Decimal('.0001'), rounding=decimal.ROUND_DOWN))
 
 cache = None
 class Cache():
@@ -73,7 +77,7 @@ def explain_seqscan(node: dict) -> str:
         explanation += f"The total CPU cost is reduced by a parallelization factor of {workers:.1f}\n" 
 
     disk_cost = seq_page_cost * page_count
-    cost = trunc((cpu_tuple_cost + filter_cost)/workers * row_count + disk_cost)
+    cost = truncate_cost((cpu_tuple_cost + filter_cost)/workers * row_count + disk_cost)
     expected_cost = node["Total Cost"]
     if cost != expected_cost and "Filter" in node:
         expected_cost -= disk_cost
@@ -287,7 +291,7 @@ def explain_result(node: dict) -> str:
             return (0, "Result usually has additional no cost associated with it.")
         cpu_tuple_cost = float(cache.get_setting("cpu_tuple_cost"))
         explanation = f"Result incurs cpu_tuple_cost ({cpu_tuple_cost}) per tuple. There are {tuples} tuple(s)"
-        cost = trunc(cpu_tuple_cost * tuples)
+        cost = truncate_cost(cpu_tuple_cost * tuples)
         if expected_cost != cost:
             comment = f"Perhaps the cost per tuple here is {(expected_cost - cost) / tuples} instead."
         return (cost, explanation, comment)
@@ -403,16 +407,22 @@ def explain_lockrows(node: dict) -> str:
     explanation += f"This adds {total_cost}"
     return (total_cost + node["Plans"][0]["Total Cost"], explanation)
 
+def clean_output(output: list) -> list:
+    pattern = '^\(?-?\d+(\.\d+)?\)?$'
+    for x in reversed(range(0,len(output))):
+        if re.match(pattern, output[x]) is not None:
+            del output[x]
+    return output
+
 def explain_setop(node: dict) -> str:
     cpu_operator_cost = float(cache.get_setting("cpu_operator_cost"))
     subpath_cost = node["Plans"][0]["Total Cost"]
-    expected_cost = node["Total Cost"] - subpath_cost
     explanation = f"There is no additional startup cost for the SetOp operator\n"
     tuples = node["Plans"][0]["Plan Rows"]
     total_cost = cpu_operator_cost * tuples
-    len_disctint = expected_cost/total_cost
-    total_cost *= len_disctint
-    explanation += f"cpu_operator_cost ({cpu_operator_cost}) is incurred for every row ({tuples}) and distinct column {(int(len_disctint))} combination\n"
+    len_distinct = len(clean_output(node["Output"]))
+    total_cost *= len_distinct
+    explanation += f"cpu_operator_cost ({cpu_operator_cost}) is incurred for every row ({tuples}) and distinct column ({len_distinct}) combination\n"
     explanation += f"This adds a cost of {total_cost}"
     return (total_cost + subpath_cost, explanation)
 
@@ -654,7 +664,18 @@ def explain_hash_join(node: dict) -> str:
 
 #     return total_cost, explanation
 
+def explain_unique(node: dict):
+    cpu_operator_cost = float(cache.get_setting("cpu_operator_cost"))
+    subpath = node["Plans"][0]
+    sub_cost = subpath["Total Cost"]
+    input_tuples = subpath["Plan Rows"]
+    numCols = len(clean_output(node["Output"]))
+    total_cost = input_tuples * numCols * cpu_operator_cost
+    explanation = f"There is no additional startup for the Unique operator.\n"
+    explanation += f"We charge cpu_operator_cost ({cpu_operator_cost}) * number of columns ({numCols}) for each input tuple ({input_tuples}).\n"
+    explanation += f"This adds {total_cost} to the total cost."
 
+    return (sub_cost + total_cost, explanation)
 
 fn_dict = {
     "Result": explain_result,
@@ -694,7 +715,7 @@ fn_dict = {
     "Group": explain_group,
     "Aggregate": explain_aggregate,
     "WindowAgg": None,
-    "Unique": None,
+    "Unique": explain_unique,
     "SetOp": explain_setop,
     "LockRows": explain_lockrows,
     "Limit": explain_limit,
@@ -733,14 +754,14 @@ class Connection():
                 expected_cost = node["Total Cost"]
                 params = fn_dict[node_type](node)
                 full_cost = params[0]
-                cost = trunc(full_cost)
+                cost = truncate_cost(full_cost)
                 explanation = params[1]
                 color = "c0ebcc" if cost == expected_cost else "ebc6c0"
                 explanation = f"<b>Calculated Cost</b>: <span style=\"background-color:#{color};\">{cost}</span>\n<b>Explanation</b>: {explanation}"
                 if len(params) > 2 and len(params[2]) > 0:
                     explanation += f"\n<b>Comments</b>: {params[2]}"
                 elif cost != expected_cost:
-                    diff = trunc(abs(full_cost - expected_cost))
+                    diff = truncate(abs(full_cost - expected_cost))
                     if diff <= 0.05:
                         explanation += f"\n<b>Comments</b>: Calculated cost is off by {diff:.4f}, which is most likely a rounding error."
                 return explanation
@@ -756,7 +777,7 @@ class Connection():
 
         cur = self.connection.cursor()
         try:
-            cur.execute(f"EXPLAIN (COSTS, FORMAT JSON) {query}")
+            cur.execute(f"EXPLAIN (COSTS, VERBOSE, FORMAT JSON) {query}")
         except Exception as e:
             return f"Error: {str(e)}"
 

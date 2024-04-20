@@ -104,18 +104,18 @@ ImageMapper = {
     'Scan': {'image': 'ex_scan.svg', 'image_text': 'Scan'},
     'Seek': {'image': 'ex_seek.svg', 'image_text': 'Seek'},
     'SetOp': lambda data: {
-    'image': 'ex_hash_setop_intersect_all.svg' if data['Command'] == 'Intersect All' else
+    'image': 'ex_setop.svg' if data['Strategy'] != "Hashed" else ( 
+             'ex_hash_setop_intersect_all.svg' if data['Command'] == 'Intersect All' else
              'ex_hash_setop_intersect.svg' if data['Command'].startswith('Intersect') else
              'ex_hash_setop_except_all.svg' if data['Command'] == 'Except All' else
              'ex_hash_setop_except.svg' if data['Command'].startswith('Except') else
-             'ex_hash_setop_unknown.svg' if data['Strategy'] == 'Hashed' else
-             'ex_setop.svg',
-    'image_text': 'Hashed Intersect All' if data['Command'] == 'Intersect All' else
+             'ex_hash_setop_unknown.svg' if data['Strategy'] == 'Hashed' else None ),
+    'image_text': 'SetOp' if data['Strategy'] != "Hashed" else ( 
+                  'Hashed Intersect All' if data['Command'] == 'Intersect All' else
                   'Hashed Intersect' if data['Command'].startswith('Intersect') else
                   'Hashed Except All' if data['Command'] == 'Except All' else
                   'Hash Except' if data['Command'].startswith('Except') else
-                  'Hashed SetOp Unknown' if data['Strategy'] == 'Hashed' else
-                  'SetOp',
+                  'Hashed SetOp Unknown' if data['Strategy'] == 'Hashed' else None ),
     },
     'Seq Scan': lambda data: {'image': 'ex_scan.svg', 'image_text': data['Relation Name']},
     'Subquery Scan': {'image': 'ex_subplan.svg', 'image_text': 'SubQuery Scan'},
@@ -255,7 +255,7 @@ class Login:
         db_label.grid(row=1,column=0)
 
         self.db_input=ttk.Entry(root, justify="center")
-        self.db_input.insert("end", "TCP-H")
+        self.db_input.insert("end", "TPC-H")
         self.db_input.grid(row=1,column=1,pady=5,padx=10)
 
         user_label=ttk.Label(root, justify="center", text="User:")
@@ -282,7 +282,7 @@ class Login:
         port_label.grid(row=5,column=0)
 
         self.port_input=ttk.Entry(root, justify="center")
-        self.port_input.insert("end", "5433")
+        self.port_input.insert("end", "5432")
         self.port_input.grid(row=5,column=1,pady=5,padx=10)
 
         connect_btn=ttk.Button(root, text="Connect", command=self.connect_btn_command)
