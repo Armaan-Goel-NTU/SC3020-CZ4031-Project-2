@@ -266,7 +266,7 @@ def explain_limit(node: dict) -> str:
     
     return (total_cost, explanation)
 
-def explain_indexscan(node: dict) -> str:
+def explain_indexscan_old(node: dict) -> str:
     cpu_index_tuple_cost = float(cache.get_setting("cpu_index_tuple_cost"))
     index_page_cost = float(cache.get_setting("effective_cache_size"))  # This adjusts the page cost based on caching
 
@@ -283,6 +283,63 @@ def explain_indexscan(node: dict) -> str:
                   f"Total cost calculated: {cost}"
     
     return (cost, explanation)
+
+def explain_indexscan(node: dict) -> str:
+    index_name = node.get("Index Name", "unknown index")
+    index_page_count = cache.get_page_count(index_name)  
+    relation_name = node["Relation Name"]
+    table_page_count = cache.get_page_count(relation_name)  
+    table_tuple_count = cache.get_tuple_count(relation_name)  
+    seq_page_cost = float(cache.get_setting("seq_page_cost"))
+    random_page_cost = float(cache.get_setting("random_page_cost"))
+    cpu_tuple_cost = float(cache.get_setting("cpu_tuple_cost"))
+    effective_cache_size = float(cache.get_setting("effective_cache_size"))
+
+    # Selectivity estimation:
+    index_selectivity = node["Plan Rows"] / table_tuple_count
+
+    # Fetch the number of tuples expected to be fetched by the index
+    tuples_fetched = index_selectivity * table_tuple_count
+
+    # Applying Mackert and Lohman formula as given in source code
+    pages_fetched = index_pages_fetched(tuples_fetched, table_page_count, index_page_count, effective_cache_size)
+
+    # Calculate I/O cost
+    if index_selectivity == 1:  
+        if pages_fetched > 1:
+            io_cost = random_page_cost + (pages_fetched - 1) * seq_page_cost
+        else:
+            io_cost = pages_fetched * seq_page_cost
+    else:  
+        io_cost = pages_fetched * random_page_cost
+
+    
+    total_cost = io_cost + tuples_fetched * cpu_tuple_cost
+
+    explanation = (
+        f"Index Scan on {index_name} over the table '{relation_name}' with an index selectivity of {index_selectivity:.4f} implies that "
+        f"approximately {tuples_fetched:.0f} tuples ({100 * index_selectivity:.2f}%) out of {table_tuple_count} are fetched. "
+        f"This results in fetching about {pages_fetched:.0f} pages due to the correlation and caching effects. "
+        f"The I/O cost calculated as {io_cost:.2f} and CPU cost for processing these tuples is {tuples_fetched * cpu_tuple_cost:.2f}. "
+        f"Thus, the total estimated cost of this index scan is {total_cost:.2f}."
+    )
+
+    return (total_cost, explanation)
+
+def index_pages_fetched(tuples_fetched, table_pages, index_pages, effective_cache_size):
+    T = max(table_pages, 1)
+    b = effective_cache_size  
+    Ns = tuples_fetched
+    if T <= b:   
+        pages_fetched = min(2 * T * Ns / (2 * T + Ns), T)
+    else:
+        lim = 2 * T * b / (2 * T - b)
+        if Ns <= lim:
+            pages_fetched = 2 * T * Ns / (2 * T + Ns)
+        else:
+            pages_fetched = b + (Ns - lim) * (T - b) / T
+    return math.ceil(pages_fetched)
+
 
 def explain_result(node: dict) -> str:
     expected_cost = node["Total Cost"]
@@ -932,7 +989,7 @@ fn_dict = {
     "Nested Loop": explain_nestedlooplect,
     "Merge Join": None,
     "Hash Join": None,
-    "Index Scan": None,
+    "Index Scan": explain_indexscan,
     "Index Only Scan": None,
     "Bitmap Index Scan": None,
     "Bitmap Heap Scan": None,
