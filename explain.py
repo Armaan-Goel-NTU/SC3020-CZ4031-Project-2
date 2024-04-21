@@ -671,7 +671,7 @@ def find_relation_name(plan):
     # Check if the current node directly has a 'Relation Name'
     if 'Relation Name' in plan:
         return plan['Relation Name']
-
+      
     # If there are sub-plans, recursively search them
     if 'Plans' in plan:
         for subplan in plan['Plans']:
@@ -690,14 +690,14 @@ def explain_nestedloop_new(node: dict) -> str:
     outer_startup_cost = outer_plan['Startup Cost']
     outer_total_cost = outer_plan['Total Cost']
     outer_rows = outer_plan['Plan Rows']
-
+    
     inner_startup_cost = inner_plan['Startup Cost'] #inner_rescan_startup_cost
     inner_total_cost = inner_plan['Total Cost'] #inner_rescan_total_cost
     inner_rows = inner_plan['Plan Rows']
-
+    
     outer_relation = find_relation_name(outer_plan)
     inner_relation = find_relation_name(inner_plan)
-
+    
     actual_outer_rows = cache.get_tuple_count(outer_relation)
     actual_inner_rows = cache.get_tuple_count(inner_relation)
     #Protect some assumptions below that rowcounts aren't zero 
@@ -720,9 +720,8 @@ def explain_nestedloop_new(node: dict) -> str:
     inner_rescan_run_cost= inner_total_cost - inner_startup_cost
 
     relation_name = find_relation_name(node)  
-
+    
     actual_rows = cache.get_tuple_count(relation_name)
-
 
     # Adjustments based on join type
     if node['Join Type'] in ['Inner']:
@@ -731,11 +730,11 @@ def explain_nestedloop_new(node: dict) -> str:
             # Extracting necessary components from the node
             outer_plan = node['Plans'][0]
             inner_plan = node['Plans'][1]
-
+            
             outer_startup_cost = outer_plan['Startup Cost']
             outer_total_cost = outer_plan['Total Cost']
             outer_rows = outer_plan['Plan Rows']
-
+            
             inner_startup_cost = inner_plan['Startup Cost']
             inner_total_cost = inner_plan['Total Cost']
             inner_rows = inner_plan['Plan Rows']
@@ -872,7 +871,7 @@ def explain_hashjoinlect(node: dict) -> str: #grace hash join
     inner_path_rows = inner_path["Plan Rows"]
     inputbuffers = get_m()
     cpu_block_size = float(cache.get_setting('block_size'))
-
+          
     # Calculate the startup and run costs
     startup_cost = 0
     run_cost = 0
@@ -917,7 +916,6 @@ def explain_mergejoinlect(node: dict) -> str: #refined sort-merge join
     inner_blocks = math.ceil(inner_path_rows * inner_path["Plan Width"] / cpu_block_size)
     blocks_accessed = 3 * (outer_blocks + inner_blocks)
     run_cost += blocks_accessed * seq_page_cost
-
 
     # Prepare explanation
     explanation = f"The startup and total costs for merge join are as follows:\n"
