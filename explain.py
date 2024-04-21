@@ -220,7 +220,7 @@ def explain_append(node: dict) -> tuple[float, str]:
     if truncate_cost(total_cost) != expected_cost and node["Parallel Aware"]:
         comment = "Our calculation for the append does not consider the effect of parallelisation.\n"
         comment += "This involves the knowledge of partial and non-partial paths.\n"
-        comment += f"The cost is likely the sum of any of the {len(node["Plans"])} child nodes + the cpu processing cost of {cpu_tuple_cost * row_count * 0.5}."
+        comment += f"The cost is likely the sum of any of the {len(node['Plans'])} child nodes + the cpu processing cost of {cpu_tuple_cost * row_count * 0.5}."
 
     return (total_cost, explanation, comment)
 

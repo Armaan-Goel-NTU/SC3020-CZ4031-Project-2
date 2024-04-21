@@ -1,0 +1,5 @@
+networkx==3.2.1
+psycopg[binary]==3.1.18
+pyvis==0.3.2
+sv_ttk==2.6.0
+numpy==1.26.4
