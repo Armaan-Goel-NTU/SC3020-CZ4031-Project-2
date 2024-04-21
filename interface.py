@@ -330,10 +330,9 @@ class App():
         self.explain_status = Text(root, height=5, state="disabled")
         self.explain_status.grid(row=3,column=0,columnspan=2,pady=5,sticky="nsew")
     
-    def set_status(self, status) -> None:
+    def clear_status(self) -> None:
         self.explain_status["state"] = "normal"
         self.explain_status.delete(1.0,"end")
-        self.explain_status.insert("end", status)
         self.explain_status["state"] = "disabled"
     
     def add_status(self, status) -> None:
@@ -343,7 +342,7 @@ class App():
         self.explain_status["state"] = "disabled"
 
     def disconnect_btn_command(self) -> None:
-        self.set_status("")
+        self.clear_status()
         self.explain_input.delete(1.0,"end")
 
         CONN.disconnect()
@@ -351,10 +350,10 @@ class App():
         self.login_frame.tkraise()
     
     def explain_btn_command(self) -> None:
-        self.set_status("")
-        explain_res = CONN.explain(query=self.explain_input.get("1.0",'end-1c'), log_cb=self.set_status, force_analysis=True)
+        self.clear_status()
+        explain_res = CONN.explain(query=self.explain_input.get("1.0",'end-1c'), log_cb=self.add_status, force_analysis=True)
         if type(explain_res) == str:
-            self.set_status(status=explain_res)
+            self.add_status(status=explain_res)
         else:
-            self.add_status("Plan generated successfully! Adding explanations now.")
+            self.add_status("Explanations generated successfully! Visualizing now.")
             VIZ.new_viz(plan=explain_res)
