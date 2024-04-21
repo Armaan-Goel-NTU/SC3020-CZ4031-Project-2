@@ -1284,6 +1284,9 @@ def explain_bitmap_heap_scan(node: dict):
 
     return total_cost, explanation
 
+# maps nodes to their explanation funcions by name
+# nodes with None are still kept here to a keep track of
+# list compiled by following ExplainNode in src/backend/commands/explain.c
 fn_dict = {
     "Nested Loop": explain_nestedloop,
     "Merge Join": explain_mergejoinlect,
