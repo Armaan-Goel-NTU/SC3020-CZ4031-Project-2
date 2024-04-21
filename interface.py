@@ -295,7 +295,7 @@ class Login:
         db_label.grid(row=1,column=0)
 
         self.db_input=ttk.Entry(root, justify="center")
-        self.db_input.insert("end", "TCP-H")
+        self.db_input.insert("end", "TPC-H")
         self.db_input.grid(row=1,column=1,pady=5,padx=10)
 
         # DB server username input
@@ -326,7 +326,7 @@ class Login:
         port_label.grid(row=5,column=0)
 
         self.port_input=ttk.Entry(root, justify="center")
-        self.port_input.insert("end", "5433")
+        self.port_input.insert("end", "5432")
         self.port_input.grid(row=5,column=1,pady=5,padx=10)
 
         # connect button
