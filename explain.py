@@ -1,6 +1,5 @@
 from collections import deque
 import psycopg
-import json
 import re
 import math
 import decimal
@@ -17,48 +16,54 @@ class Cache():
         self.dict = {}
         self.cur = cur
     
-    def query_setting(self, setting: str):
+    def query_setting(self, setting: str) -> str:
         self.cur.execute(f"SELECT setting FROM pg_settings WHERE name = '{setting}'")
         return self.cur.fetchall()[0][0]
 
-    def query_pagecount(self, relation: str):
+    def query_pagecount(self, relation: str) -> int:
         self.cur.execute(f"SELECT relpages FROM pg_class WHERE relname = '{relation}'")
         return self.cur.fetchall()[0][0]
 
-    def query_tuplecount(self, relation: str):
+    def query_tuplecount(self, relation: str) -> int:
         self.cur.execute(f"SELECT reltuples FROM pg_class where relname = '{relation}'")
         return self.cur.fetchall()[0][0]
     
-    def get_setting(self, setting: str):
+    def get_setting(self, setting: str) -> str:
         key = f"setting/{setting}"
         if key not in self.dict:
+            self.log_cb(f"Querying {key}")
             self.dict[key] = self.query_setting(setting)
         return self.dict[key]
             
-    def get_page_count(self, relation: str):
+    def get_page_count(self, relation: str) -> int:
         key = f"relpages/{relation}"
         if key not in self.dict:
+            self.log_cb(f"Querying {key}")
             self.dict[key] = self.query_pagecount(relation)
         return self.dict[key]        
 
-    def get_tuple_count(self, relation: str):
+    def get_tuple_count(self, relation: str) -> int:
         key = f"reltuples/{relation}"    
         if key not in self.dict:
+            self.log_cb(f"Querying {key}")
             self.dict[key] = self.query_tuplecount(relation)
         return self.dict[key]
     
     def set_tuple_count(self, relation: str, count:int):
         key = f"reltuples/{relation}"
         self.dict[key] = count
+    
+    def set_log_cb(self, log_cb: callable):
+        self.log_cb = log_cb
 
-def count_clauses(condition: str):
+def count_clauses(condition: str) -> int:
     or_count = condition.count(') OR (')
     and_count = condition.count(') AND (')
     total_count = or_count + and_count + 1 
     
     return total_count
 
-def explain_seqscan(node: dict) -> str:
+def explain_seqscan(node: dict) -> tuple[float, str, str]:
     cpu_tuple_cost = float(cache.get_setting("cpu_tuple_cost"))
     seq_page_cost = float(cache.get_setting("seq_page_cost"))
     rel = node["Relation Name"]
@@ -71,8 +76,7 @@ def explain_seqscan(node: dict) -> str:
     explanation = f"Sequential Scan has a cpu cost of cpu_tuple_cost * T(R) and a disk cost of seq_page_cost * B(R).\n"
     explanation += f"B(R) = {page_count}, T(R) = {row_count}, cpu_tuple_cost={cpu_tuple_cost}, seq_page_cost={seq_page_cost}.\n"
     if "Filter" in node:
-        pattern = r"\([^()]*\)"
-        filters = len(re.findall(pattern, node["Filter"]))
+        filters = count_clauses(node["Filter"])
         cpu_operator_cost = float(cache.get_setting("cpu_operator_cost"))
         filter_cost = filters * cpu_operator_cost
         explanation += f"CPU cost per tuple is increased by {filter_cost:.4f} for {filters} filters * cpu_operator_cost ({cpu_operator_cost})\n"
@@ -103,7 +107,7 @@ def explain_seqscan(node: dict) -> str:
 def align(val : int, len : int) -> int:
     return val + (len - (val % len))
 
-def explain_materialize(node: dict) -> str:
+def explain_materialize(node: dict) -> tuple[float, str]:
     tuples = node["Plan Rows"]
     width = node["Plan Width"]
     child = node["Plans"][0]
@@ -128,7 +132,7 @@ def explain_materialize(node: dict) -> str:
     explanation += f"Additional cost incurred is {cost:.2f}"
     return (cost + child['Total Cost'], explanation)
 
-def explain_merge_append(node: dict) -> str: 
+def explain_merge_append(node: dict) -> tuple[float, str]:
     cpu_operator_cost = float(cache.get_setting("cpu_operator_cost"))
     cpu_tuple_cost = float(cache.get_setting("cpu_tuple_cost"))
     tuples = sum(child["Plan Rows"] for child in node.get("Plans", []))
@@ -151,7 +155,7 @@ def explain_merge_append(node: dict) -> str:
     return (startup_cost + run_cost + sum(child["Total Cost"] for child in node.get("Plans", [])), explanation)
 
 
-def explain_append(node: dict) -> str:
+def explain_append(node: dict) -> tuple[float, str]:
     # gather child costs
     cpu_tuple_cost = float(cache.get_setting("cpu_tuple_cost"))
     child_costs = [child["Total Cost"] for child in node.get("Plans", [])]
@@ -174,7 +178,7 @@ def explain_append(node: dict) -> str:
 
     return (total_cost, explanation)
 
-def explain_gather(node: dict) -> str:
+def explain_gather(node: dict) -> tuple[float, str]:
 
     parallel_setup_cost = float(cache.get_setting("parallel_setup_cost"))
     parallel_tuple_cost = float(cache.get_setting("parallel_tuple_cost"))
@@ -207,7 +211,7 @@ def explain_gather(node: dict) -> str:
 
     return (total_cost, explanation)
 
-def explain_gather_merge(node: dict) -> str:
+def explain_gather_merge(node: dict) -> tuple[float, str]:
     parallel_setup_cost = float(cache.get_setting("parallel_setup_cost"))
     parallel_tuple_cost = float(cache.get_setting("parallel_tuple_cost"))
     cpu_operator_cost = float(cache.get_setting("cpu_operator_cost"))
@@ -237,7 +241,7 @@ def explain_gather_merge(node: dict) -> str:
 
     return (startup_cost + run_cost + subpath_total_cost, explanation)
 
-def explain_limit(node: dict) -> str:
+def explain_limit(node: dict) -> tuple[float, str]:
     if 'Plans' not in node or len(node['Plans']) != 1:
         return (0, "Limit node must have exactly one child plan.")
 
@@ -284,7 +288,7 @@ def explain_indexscan_old(node: dict) -> str:
     
     return (cost, explanation)
 
-def explain_indexscan(node: dict) -> str:
+def explain_indexscan(node: dict) -> tuple[float, str]:
     index_name = node.get("Index Name", "unknown index")
     index_page_count = cache.get_page_count(index_name)  
     relation_name = node["Relation Name"]
@@ -326,7 +330,7 @@ def explain_indexscan(node: dict) -> str:
 
     return (total_cost, explanation)
 
-def index_pages_fetched(tuples_fetched, table_pages, index_pages, effective_cache_size):
+def index_pages_fetched(tuples_fetched, table_pages, index_pages, effective_cache_size) -> float:
     T = max(table_pages, 1)
     b = effective_cache_size  
     Ns = tuples_fetched
@@ -341,7 +345,7 @@ def index_pages_fetched(tuples_fetched, table_pages, index_pages, effective_cach
     return math.ceil(pages_fetched)
 
 
-def explain_result(node: dict) -> str:
+def explain_result(node: dict) -> tuple[float, str, str]:
     expected_cost = node["Total Cost"]
     tuples = node["Plan Rows"]
     comment = ""
@@ -361,7 +365,7 @@ def explain_result(node: dict) -> str:
             comment = f"Perhaps the cost per tuple here is {(expected_cost - cost) / tuples} instead."
         return (cost, explanation, comment)
 
-def explain_sort(node: dict) -> str:
+def explain_sort(node: dict) -> tuple[float, str]:
     tuples = node["Plan Rows"]
     width = node["Plan Width"]
     input_startup_cost = node['Startup Cost']  # Startup cost from PostgreSQL
@@ -394,7 +398,7 @@ def explain_sort(node: dict) -> str:
 
 
 #TODO: can make sum of children more precise (check if bitmap and/or/index for these functions)
-def explain_bitmap_or(node: dict) -> str:
+def explain_bitmap_or(node: dict) -> tuple[float, str]:
     cpu_operator_cost = float(cache.get_setting("cpu_operator_cost"))
     cost = sum([child["Total Cost"] for child in node.get("Plans", [])])
     tuples = node["Plan Rows"]
@@ -420,7 +424,7 @@ def explain_bitmap_or(node: dict) -> str:
     
     return (cost, explanation)
 
-def explain_bitmap_and(node: dict) -> str:
+def explain_bitmap_and(node: dict) -> tuple[float, str]:
     cpu_operator_cost = float(cache.get_setting("cpu_operator_cost"))
     cost = sum([child["Total Cost"] for child in node.get("Plans", [])])
     tuples = node["Plan Rows"]
@@ -440,7 +444,7 @@ def explain_bitmap_and(node: dict) -> str:
     
     return (cost, explanation)
 
-def explain_group(node: dict) -> str:
+def explain_group(node: dict) -> tuple[float, str]:
     cpu_operator_cost = float(cache.get_setting("cpu_operator_cost"))
     numGroupCols = len(node["Group Key"])
     input_tuples = node["Plans"][0]["Plan Rows"]
@@ -450,8 +454,7 @@ def explain_group(node: dict) -> str:
     explanation = f"cpu_operator_cost ({cpu_operator_cost}) is incurred for every input tuple ({input_tuples}) and grouping clause ({numGroupCols}) combination\n"
 
     if "Filter" in node:
-        pattern = r"\([^()]*\)"
-        filters = len(re.findall(pattern, node["Filter"]))
+        filters = count_clauses(node["Filter"])
         cpu_operator_cost = float(cache.get_setting("cpu_operator_cost"))
         filter_cost = filters * cpu_operator_cost
         explanation += f"CPU cost per output tuple is increased by {filter_cost:.4f} for {filters} filters * cpu_operator_cost ({cpu_operator_cost})\n"
@@ -462,7 +465,7 @@ def explain_group(node: dict) -> str:
     return (total_cost + node["Plans"][0]["Total Cost"], explanation)
 
 #TODO find a query that uses lockrows
-def explain_lockrows(node: dict) -> str:
+def explain_lockrows(node: dict) -> tuple[float, str]:
     cpu_tuple_cost = float(cache.get_setting("cpu_tuple_cost"))
     tuples = node["Plans"][0]["Plan Rows"]
     total_cost = cpu_tuple_cost * tuples
@@ -478,7 +481,7 @@ def clean_output(output: list) -> list:
             del output[x]
     return output
 
-def explain_setop(node: dict) -> str:
+def explain_setop(node: dict) -> tuple[float, str]:
     cpu_operator_cost = float(cache.get_setting("cpu_operator_cost"))
     subpath_cost = node["Plans"][0]["Total Cost"]
     explanation = f"There is no additional startup cost for the SetOp operator\n"
@@ -491,7 +494,7 @@ def explain_setop(node: dict) -> str:
     return (total_cost + subpath_cost, explanation)
 
 #TODO: check if filtering needed
-def explain_subqueryscan(node: dict) -> str:
+def explain_subqueryscan(node: dict) -> tuple[float, str]:
     explanation = f"There is no additional startup cost for the Subquery Scan operator\n"
     cpu_tuple_cost = float(cache.get_setting("cpu_tuple_cost"))
     subpath_cost = node["Plans"][0]["Total Cost"]
@@ -502,7 +505,7 @@ def explain_subqueryscan(node: dict) -> str:
     return (total_cost + subpath_cost, explanation)
 
 #TODO: check if filtering needed
-def explain_valuescan(node: dict) -> str:
+def explain_valuescan(node: dict) -> tuple[float, str]:
     explanation = f"There is no startup cost for the Subquery Scan operator\n"
     cpu_operator_cost = float(cache.get_setting("cpu_operator_cost"))
     cpu_tuple_cost = float(cache.get_setting("cpu_tuple_cost"))
@@ -512,11 +515,11 @@ def explain_valuescan(node: dict) -> str:
     explanation += f"The total cost is {total_cost}"
     return (total_cost, explanation)
 
-def explain_modify_table(node: dict) -> str:
+def explain_modify_table(node: dict) -> tuple[float, str]:
     explanation = f"There is no cost associated with this node."
     return (node["Plans"][0]["Total Cost"], explanation)
 
-def explain_project_set(node: dict) -> str:
+def explain_project_set(node: dict) -> tuple[float, str]:
     explanation = f"There is no startup cost for the ProjectSet operator\n"
     cpu_tuple_cost = float(cache.get_setting("cpu_tuple_cost"))
     subpath_cost = node["Plans"][0]["Total Cost"]
@@ -531,7 +534,7 @@ def explain_project_set(node: dict) -> str:
     explanation += f"This adds {run_cost} to the total cost"
     return (run_cost + subpath_cost, explanation)
 
-def explain_recursive_union(node: dict) -> str:
+def explain_recursive_union(node: dict) -> tuple[float, str]:
     explanation = f"There is no startup cost for the Recursive Union operator\n"
     nterm = node["Plans"][0]
     rterm = node["Plans"][1]
@@ -549,11 +552,11 @@ def explain_recursive_union(node: dict) -> str:
 
     return (total_cost, explanation)
 
-def explain_hash(node: dict) -> str:
+def explain_hash(node: dict) -> tuple[float, str]:
     explanation = f"The hash operator incurs no additional cost as it builds a hash table in memory.\n"
     return (node["Plans"][0]["Total Cost"], explanation)
 
-def explain_aggregate(node: dict) -> str: #not done, no of workers not accounted
+def explain_aggregate(node: dict) -> tuple[float, str, str]: #not done, no of workers not accounted
     cpu_operator_cost = float(cache.get_setting("cpu_operator_cost"))
     cpu_tuple_cost = float(cache.get_setting("cpu_tuple_cost"))
     child = node["Plans"][0]
@@ -628,11 +631,10 @@ def explain_nestedloop(node: dict) -> str: #total cost is wrong
     explanation += f"- Total cost also includes the cpu_tuple_cost ({cpu_tuple_cost}) of processing every resulting output row"
     return startup_cost + run_cost, explanation
 
-
-def get_m():
+def get_m() -> float:
     return float(cache.get_setting('work_mem')) * 1024 / float(cache.get_setting('block_size'))
 
-def explain_nestedlooplect(node: dict) -> str: #total cost is wrong
+def explain_nestedlooplect(node: dict) -> tuple[float, str]:
     seq_page_cost = float(cache.get_setting("seq_page_cost"))
     outer_path = [child for child in node["Plans"] if child["Parent Relationship"] == "Outer"][0]
     inner_path = [child for child in node["Plans"] if child["Parent Relationship"] == "Inner"][0]
@@ -665,8 +667,153 @@ def explain_nestedlooplect(node: dict) -> str: #total cost is wrong
     explanation += f"- The run cost will be the seq_page_cost({seq_page_cost}) of accessing all the blocks"
     return startup_cost + run_cost, explanation
 
+def find_relation_name(plan):
+    # Check if the current node directly has a 'Relation Name'
+    if 'Relation Name' in plan:
+        return plan['Relation Name']
 
-def explain_hash_join(node: dict) -> str:
+    # If there are sub-plans, recursively search them
+    if 'Plans' in plan:
+        for subplan in plan['Plans']:
+            relation_name = find_relation_name(subplan)
+            if relation_name:
+                return relation_name
+
+    return None 
+
+def explain_nestedloop_new(node: dict) -> str:
+    cpu_tuple_cost = float(cache.get_setting("cpu_tuple_cost"))
+    # Extracting costs and rows from the node dictionary
+    outer_plan = node['Plans'][0]
+    inner_plan = node['Plans'][1]
+
+    outer_startup_cost = outer_plan['Startup Cost']
+    outer_total_cost = outer_plan['Total Cost']
+    outer_rows = outer_plan['Plan Rows']
+
+    inner_startup_cost = inner_plan['Startup Cost'] #inner_rescan_startup_cost
+    inner_total_cost = inner_plan['Total Cost'] #inner_rescan_total_cost
+    inner_rows = inner_plan['Plan Rows']
+
+    outer_relation = find_relation_name(outer_plan)
+    inner_relation = find_relation_name(inner_plan)
+
+    actual_outer_rows = cache.get_tuple_count(outer_relation)
+    actual_inner_rows = cache.get_tuple_count(inner_relation)
+    #Protect some assumptions below that rowcounts aren't zero 
+    if (outer_rows <= 0):
+        outer_rows = 1
+
+    if (inner_rows <= 0):
+        inner_rows = 1
+    startup_cost =0
+    run_cost=0
+    # Basic calculations for startup and run costs
+    startup_cost += outer_startup_cost + inner_startup_cost
+    #run_cost = (outer_total_cost - outer_startup_cost) + (inner_total_cost - inner_startup_cost) * outer_rows
+    run_cost += (outer_total_cost - outer_startup_cost)
+
+    if (outer_rows>1):
+        run_cost+=(outer_rows-1)*inner_startup_cost   #inner_rescan_start_cost
+
+    inner_run_cost = inner_total_cost-inner_startup_cost
+    inner_rescan_run_cost= inner_total_cost - inner_startup_cost
+
+    relation_name = find_relation_name(node)  
+
+    actual_rows = cache.get_tuple_count(relation_name)
+
+
+    # Adjustments based on join type
+    if node['Join Type'] in ['Inner']:
+            cpu_tuple_cost = float(cache.get_setting("cpu_tuple_cost"))
+
+            # Extracting necessary components from the node
+            outer_plan = node['Plans'][0]
+            inner_plan = node['Plans'][1]
+
+            outer_startup_cost = outer_plan['Startup Cost']
+            outer_total_cost = outer_plan['Total Cost']
+            outer_rows = outer_plan['Plan Rows']
+
+            inner_startup_cost = inner_plan['Startup Cost']
+            inner_total_cost = inner_plan['Total Cost']
+            inner_rows = inner_plan['Plan Rows']
+
+            startup_cost = outer_startup_cost + inner_startup_cost
+            run_cost = outer_total_cost - outer_startup_cost 
+
+            if outer_rows > 1:
+                run_cost += (outer_rows - 1) * inner_startup_cost
+
+            inner_run_cost = inner_total_cost - inner_startup_cost
+
+            run_cost += outer_rows * inner_run_cost
+
+            total_cost = startup_cost + run_cost
+
+            explanation = (
+                f"Nested Loop Join (Inner Join) Explanation:\n"
+                f"- Outer Plan: {outer_plan['Node Type']} with {outer_rows} rows\n"
+                f"- Inner Plan: {inner_plan['Node Type']} with {inner_rows} rows\n"
+                f"- Startup Cost: Outer = {outer_startup_cost:.2f}, Inner = {inner_startup_cost:.2f}, Total = {startup_cost:.2f}\n"
+                f"- Run Cost: Outer Total = {outer_total_cost:.2f}, Inner per Row = {inner_run_cost:.2f}, Total Run = {run_cost:.2f}\n"
+                f"- Total Cost: {total_cost:.2f}\n"
+            )
+
+            return total_cost, explanation
+
+
+    if node['Join Type'] in ['Semi', 'Anti']:
+        # Assuming early exit after the first match
+        outer_match_frac = min(1, actual_rows / actual_outer_rows if actual_outer_rows > 0 else 1)
+        match_count = actual_rows / outer_rows if outer_rows > 0 else 0
+
+        outer_matched_rows=outer_rows*outer_match_frac
+        outer_unmatched_rows= outer_rows - outer_matched_rows
+        inner_scan_frac = 2.0 / (match_count + 1.0)
+
+        ntuples = outer_matched_rows * inner_rows * inner_scan_frac
+
+    # Calculate the number of tuples processed (not necessarily resulting in output)
+        ntuples = outer_matched_rows * inner_rows * inner_scan_frac
+        #run_cost+= inner_run_cost * inner_scan_frac
+        #run_cost = (outer_total_cost - outer_startup_cost) + inner_startup_cost * outer_rows #final loop
+
+        #if no index join quals
+        ntuples += outer_unmatched_rows * inner_rows
+        run_cost += inner_run_cost
+        if (outer_unmatched_rows >= 1):
+            outer_unmatched_rows -= 1
+        else:
+            outer_matched_rows -= 1
+        if (outer_matched_rows > 0):
+            run_cost += outer_matched_rows * inner_rescan_run_cost * inner_scan_frac
+        if(outer_unmatched_rows > 0):
+            run_cost += outer_unmatched_rows * inner_rescan_run_cost
+
+    #normal case:
+    else:
+        run_cost+=inner_run_cost
+        if (outer_rows >1):
+            run_cost+=(outer_rows-1)*inner_rescan_run_cost
+        ntuples = outer_rows * inner_rows
+        run_cost +=  cpu_tuple_cost* ntuples
+
+    total_cost = startup_cost + run_cost
+
+    # Explanation assembly
+    explanation = f"Nested Loop Join Explanation:\n" \
+                  f"- Outer Rows: {outer_rows}, Inner Rows: {inner_rows}\n" \
+                  f"- Startup Costs: Outer = {outer_startup_cost}, Inner = {inner_startup_cost}, Total = {startup_cost}\n" \
+                  f"- Run Costs: Outer Run Cost = {outer_total_cost - outer_startup_cost}\n " \
+                  f"-Inner Run Cost per Outer Row = {inner_total_cost - inner_startup_cost}\n " \
+                  f"-Total Run Cost = {run_cost}\n" \
+                  f"- Total Cost: {total_cost}\n"
+
+    return total_cost, explanation
+
+def explain_hash_join(node: dict) -> tuple[float, str]:
     # Configuration settings
     cpu_operator_cost = float(cache.get_setting("cpu_operator_cost"))
     cpu_tuple_cost = float(cache.get_setting("cpu_tuple_cost"))
@@ -717,57 +864,71 @@ def explain_hash_join(node: dict) -> str:
 
     return total_cost, explanation
 
+def explain_hashjoinlect(node: dict) -> str: #grace hash join
+    seq_page_cost = float(cache.get_setting("seq_page_cost"))
+    outer_path = [child for child in node["Plans"] if child["Parent Relationship"] == "Outer"][0]
+    inner_path = [child for child in node["Plans"] if child["Parent Relationship"] == "Inner"][0]
+    outer_path_rows = outer_path["Plan Rows"]
+    inner_path_rows = inner_path["Plan Rows"]
+    inputbuffers = get_m()
+    cpu_block_size = float(cache.get_setting('block_size'))
+
+    # Calculate the startup and run costs
+    startup_cost = 0
+    run_cost = 0
+
+    # Startup cost
+    startup_cost = node.get('Startup Cost', 1.56)
+
+    # Calculate the run cost of the inner relation excluding startup cost
+    outer_blocks = math.ceil(outer_path_rows * outer_path["Plan Width"] / cpu_block_size)
+    inner_blocks = math.ceil(inner_path_rows * inner_path["Plan Width"] / cpu_block_size)
+    blocks_accessed = 3 * (outer_blocks + inner_blocks)
+    run_cost += blocks_accessed * seq_page_cost
 
 
-# def explain_hash_join(node: dict) -> str:
-#     cpu_operator_cost = float(cache.get_setting("cpu_operator_cost"))
-#     cpu_tuple_cost = float(cache.get_setting("cpu_tuple_cost"))
-#     seq_page_cost = float(cache.get_setting("seq_page_cost"))
-#     block_size = float(cache.get_setting("block_size"))
-    
-#     outer_path = node["Plans"][0]
-#     inner_path = node["Plans"][1]
-#     outer_path_rows = outer_path["Plan Rows"]
-#     inner_path_rows = inner_path["Plan Rows"]
+    # Prepare explanation
+    explanation = f"The startup and total costs for the hash join are as follows:\n"
+    explanation += f"Startup cost: {startup_cost}\n"
+    explanation += f"Total cost is the startup cost and run cost: {startup_cost + run_cost}\n"
+    explanation += f"- Following the formula of 3(B(R) + B(S))\n"
+    explanation += f"- B(outerloop) = {outer_blocks}, B(innerloop) = {inner_blocks}, and M = {inputbuffers}\n"
+    explanation += f"- The run cost will be the seq_page_cost({seq_page_cost}) of accessing all the blocks"
+    return startup_cost + run_cost, explanation
 
-#     # Assuming startup cost is given:
-#     input_startup_cost = node['Startup Cost']
+def explain_mergejoinlect(node: dict) -> str: #refined sort-merge join
+    seq_page_cost = float(cache.get_setting("seq_page_cost"))
+    outer_path = [child for child in node["Plans"] if child["Parent Relationship"] == "Outer"][0]
+    inner_path = [child for child in node["Plans"] if child["Parent Relationship"] == "Inner"][0]
+    outer_path_rows = outer_path["Plan Rows"]
+    inner_path_rows = inner_path["Plan Rows"]
+    inputbuffers = get_m()
+    cpu_block_size = float(cache.get_setting('block_size'))
 
-#     # Calculate run cost:
-#     run_cost = 0
+    # Calculate the startup and run costs
+    startup_cost = 0
+    run_cost = 0
 
-#     # Compute cost of hashing all tuples in the inner relation
-#     # Assuming one cpu_operator_cost per tuple for hashing
-#     run_cost += (cpu_operator_cost + cpu_tuple_cost) * inner_path_rows
+    # Startup cost
+    startup_cost = node.get('Startup Cost', 1.56)
 
-#     # Compute cost of processing each outer tuple
-#     # Assuming a match needs to check each outer tuple against hash table entries
-#     run_cost += cpu_operator_cost * outer_path_rows
+    # Calculate the run cost of the inner relation excluding startup cost
+    outer_blocks = math.ceil(outer_path_rows * outer_path["Plan Width"] / cpu_block_size)
+    inner_blocks = math.ceil(inner_path_rows * inner_path["Plan Width"] / cpu_block_size)
+    blocks_accessed = 3 * (outer_blocks + inner_blocks)
+    run_cost += blocks_accessed * seq_page_cost
 
-#     # If batching is necessary due to memory constraints
-#     estimated_inner_size = inner_path_rows * inner_path.get("Plan Width", 100)  # Default width
-#     inner_pages = estimated_inner_size / block_size
 
-#     work_mem = float(cache.get_setting("work_mem")) * 1024 * 1024  # Convert MB to bytes
-#     if estimated_inner_size > work_mem:
-#         # If more than one batch is needed, add cost of writing/reading batches to/from disk
-#         numbatches = max(1, estimated_inner_size / work_mem)
-#         run_cost += seq_page_cost * inner_pages * numbatches
+    # Prepare explanation
+    explanation = f"The startup and total costs for merge join are as follows:\n"
+    explanation += f"Startup cost: {startup_cost}\n"
+    explanation += f"Total cost is the startup cost and run cost: {startup_cost + run_cost}\n"
+    explanation += f"- Following the formula of 3(B(R) + B(S))\n"
+    explanation += f"- B(outerloop) = {outer_blocks}, B(innerloop) = {inner_blocks}, and M = {inputbuffers}\n"
+    explanation += f"- The run cost will be the seq_page_cost({seq_page_cost}) of accessing all the blocks"
+    return startup_cost + run_cost, explanation
 
-#     total_cost = input_startup_cost + run_cost
-
-#     # Prepare the explanation
-#     explanation = f"Hash Join Cost Estimation:\n"
-#     explanation += f"Outer Rows: {outer_path_rows}, Inner Rows: {inner_path_rows}\n"
-#     explanation += f"Startup Cost: {input_startup_cost:.2f}\n"
-#     explanation += f"Run Cost: {run_cost:.2f}\n"
-#     explanation += f"Total Cost: {total_cost:.2f}\n"
-#     explanation += f"- Run cost includes the cost of hashing inner tuples and checking outer tuples against hash table\n"
-#     explanation += f"- Additional cost for handling batches if memory constraints require disk-based operations\n"
-
-#     return total_cost, explanation
-
-def explain_unique(node: dict):
+def explain_unique(node: dict) -> tuple[float, str]:
     cpu_operator_cost = float(cache.get_setting("cpu_operator_cost"))
     subpath = node["Plans"][0]
     sub_cost = subpath["Total Cost"]
@@ -780,7 +941,7 @@ def explain_unique(node: dict):
 
     return (sub_cost + total_cost, explanation)
 
-def explain_cte(node : dict):
+def explain_cte(node : dict) -> tuple[float, str, str]:
     cpu_tuple_cost = float(cache.get_setting("cpu_tuple_cost")) 
     cost_per_tuple = cpu_tuple_cost * 2
     explanation = f"WorkTable/CTE Scan charges 2 * cpu_tuple_cost ({cpu_tuple_cost}) per tuple.\n"
@@ -791,8 +952,7 @@ def explain_cte(node : dict):
         rows = node["Plans"][0]["Plan Rows"]
         base_cost = node["Plans"][0]["Total Cost"]
     if "Filter" in node:
-        pattern = r"\([^()]*\)"
-        filters = len(re.findall(pattern, node["Filter"]))
+        filters = count_clauses(node["Filter"])
         cpu_operator_cost = float(cache.get_setting("cpu_operator_cost"))
         filter_cost = filters * cpu_operator_cost
         cost_per_tuple += filter_cost
@@ -809,7 +969,7 @@ def explain_cte(node : dict):
     
     return (base_cost + total_cost, explanation, comment)
 
-def explain_xyz_scan(node: dict, fn_name:str):
+def explain_xyz_scan(node: dict, fn_name:str) -> tuple[float, str, str]:
     cpu_tuple_cost = float(cache.get_setting("cpu_tuple_cost")) 
     tuples = node["Plan Rows"]
     total_cost = tuples * cpu_tuple_cost
@@ -825,16 +985,16 @@ def explain_xyz_scan(node: dict, fn_name:str):
     
     return (startup_cost + total_cost, explanation, comment)
 
-def explain_functionscan(node: dict):
+def explain_functionscan(node: dict) -> tuple[float, str, str]:
     return explain_xyz_scan(node, "Function Scan")
 
-def explain_tablefunctionscan(node: dict):
+def explain_tablefunctionscan(node: dict) -> tuple[float, str, str]:
     return explain_xyz_scan(node, "Table Function Scan")
 
-def explain_namedtuplestorescan(node: dict):
+def explain_namedtuplestorescan(node: dict) -> tuple[float, str, str]:
     return explain_xyz_scan(node, "Named Tuplestore Scan")
 
-def explain_tidscan(node: dict):
+def explain_tidscan(node: dict) -> tuple[float, str, str]:
     cpu_operator_cost = float(cache.get_setting("cpu_operator_cost")) 
     cpu_tuple_cost = float(cache.get_setting("cpu_tuple_cost")) 
     random_page_cost = float(cache.get_setting("random_page_cost")) 
@@ -865,7 +1025,7 @@ def explain_tidscan(node: dict):
 
     return (startup_cost + total_cost, explanation, comment)
 
-def explain_tidrangescan(node: dict):
+def explain_tidrangescan(node: dict) -> tuple[float, str, str]:
     cpu_operator_cost = float(cache.get_setting("cpu_operator_cost")) 
     cpu_tuple_cost = float(cache.get_setting("cpu_tuple_cost")) 
     random_page_cost = float(cache.get_setting("random_page_cost")) 
@@ -911,7 +1071,7 @@ def explain_tidrangescan(node: dict):
 
     return (startup_cost + total_cost, explanation, comment)
 
-def explain_samplescan(node: dict):
+def explain_samplescan(node: dict) -> tuple[float, str, str]:
     relpages = cache.get_page_count(node["Relation Name"])
     reltuples = cache.get_tuple_count(node["Relation Name"])
     cpu_operator_cost = float(cache.get_setting("cpu_operator_cost"))
@@ -954,14 +1114,14 @@ def explain_samplescan(node: dict):
 
     return (total_cost, explanation, comment)    
 
-def explain_memoize(node: dict):
+def explain_memoize(node: dict) -> tuple[float, str]:
     cpu_tuple_cost = float(cache.get_setting("cpu_tuple_cost"))
     explanation = f"Postgres charges cpu_tuple_cost ({cpu_tuple_cost}) at startup (and subsequently total cost) as the cost to cache the first entry.\n"
     explanation += f"The actual cost of rescanning and caching during the many loops of a Nested Join is calculated by the Nested Loop operator.\n"
 
     return (node["Plans"][0]["Total Cost"] + 0.01, explanation)
 
-def explain_windowagg(node: dict):
+def explain_windowagg(node: dict) -> tuple[float, str, str]:
     cpu_operator_cost = float(cache.get_setting("cpu_operator_cost"))
     cpu_tuple_cost = float(cache.get_setting("cpu_tuple_cost"))
 
@@ -986,9 +1146,9 @@ def explain_windowagg(node: dict):
     return (total_cost + child_cost, explanation, comment)
 
 fn_dict = {
-    "Nested Loop": explain_nestedlooplect,
-    "Merge Join": None,
-    "Hash Join": None,
+    "Nested Loop": explain_nestedloop_new,
+    "Merge Join": explain_mergejoinlect,
+    "Hash Join": explain_hashjoinlect,
     "Index Scan": explain_indexscan,
     "Index Only Scan": None,
     "Bitmap Index Scan": None,
@@ -1083,20 +1243,22 @@ class Connection():
 
     def explain(self, query:str, force_analysis:bool, log_cb: callable) -> str:
         self.log = log_cb
+        cache.set_log_cb(log_cb)
+
         if not self.connected():
             return "No database connection found! There is no context for this query."
 
         cur = self.connection.cursor()
+        log_cb("Asking Postgres for QEP")
         try:
             cur.execute(f"EXPLAIN (COSTS, VERBOSE, FORMAT JSON) {query}")
         except Exception as e:
             return f"Error: {str(e)}"
         
         plan = cur.fetchall()[0][0][0]['Plan']
-        with open("plan.json","w") as f:
-            f.write(json.dumps(plan, indent=2))
         node_stack = deque()
 
+        log_cb("Pushing Workers Planned Down")
         def add_nodes(node, workers):
             if "Workers Planned" in node:
                 workers = node["Workers Planned"]
@@ -1109,6 +1271,7 @@ class Connection():
 
         add_nodes(plan, 1)
 
+        log_cb("Checking for missing analysis")
         if force_analysis:
             stack_copy = node_stack.copy()
             reexplain = False
@@ -1119,6 +1282,7 @@ class Connection():
                     tuple_count = cache.query_tuplecount(rel)
                     if tuple_count == -1:
                         reexplain = True
+                        log_cb(f"Analysis missing for {rel}\n")
                         try:
                             cur.execute(f"ANALYZE {rel}")
                         except Exception as e:
@@ -1127,6 +1291,7 @@ class Connection():
                         cache.set_tuple_count(rel, tuple_count)
                         
             if reexplain:
+                log_cb(f"Asking Postgres to generate QEP again\n")
                 return self.explain(query, False, log_cb)
                 
         for _ in range(len(node_stack)):
