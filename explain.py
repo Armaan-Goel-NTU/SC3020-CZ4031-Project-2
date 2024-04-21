@@ -671,13 +671,13 @@ def explain_aggregate(node: dict) -> tuple[float, str, str]:
     child_cost = child["Total Cost"]
     child_tuples = child["Plan Rows"]
     strategy = node["Strategy"]
-    total_cost = child_cost
+    total_cost = node["Startup Cost"]
 
-    # plain agg is simple
+    # plain agg is simple if startup cost is ignored
     if strategy == "Plain":
         explanation = f"In Plain Aggregation, there is no grouping involved.\n"
-        explanation += f"The startup cost is the total cost of the child node.\n"
-        explanation += f"cpu_tuple_cost ({cpu_tuple_cost} is added to the the total cost.\n"
+        explanation += f"The startup cost is the total cost of the child node and aggregation costs on input tuples.\n"
+        explanation += f"cpu_tuple_cost ({cpu_tuple_cost}) is added to the the total cost."
         return (total_cost + cpu_tuple_cost, explanation)
 
     # just in case
