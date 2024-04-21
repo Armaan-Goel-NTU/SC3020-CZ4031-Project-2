@@ -86,6 +86,7 @@ def count_clauses(condition: str) -> int:
     return total_count
 
 # explanation function for Sequential Scan
+# adapted from cost_seqscan in src/backend/optimizer/path/costsize.c
 def explain_seqscan(node: dict) -> tuple[float, str, str]:
     cpu_tuple_cost = float(cache.get_setting("cpu_tuple_cost"))
     seq_page_cost = float(cache.get_setting("seq_page_cost"))
@@ -105,6 +106,9 @@ def explain_seqscan(node: dict) -> tuple[float, str, str]:
         explanation += f"CPU cost per tuple is increased by {filter_cost:.4f} for {filters} filters * cpu_operator_cost ({cpu_operator_cost})\n"
 
     cpu_cost = (cpu_tuple_cost + filter_cost) * row_count
+    
+    # account for parallelisation
+    # code adapted from get_parallel_divisor in src/backend/optimizer/path/costsize.c
     if node["Parallel Aware"] and "Workers Planned" in node:
         workers = node["Workers Planned"]
         if cache.get_setting("parallel_leader_participation") == "on" and workers < 4:
@@ -113,6 +117,8 @@ def explain_seqscan(node: dict) -> tuple[float, str, str]:
 
     disk_cost = seq_page_cost * page_count
     cost = truncate_cost(cpu_cost / workers + disk_cost)
+
+    # reverse all the calculations to get the expected filtering cost
     expected_cost = node["Total Cost"]
     if cost != expected_cost:
         expected_cost -= disk_cost
@@ -132,6 +138,7 @@ def align(val : int, len : int) -> int:
     return val + (len - (val % len))
 
 # explanation function for Materialize
+# adapted from cost_material in src/backend/optimizer/path/costsize.c
 def explain_materialize(node: dict) -> tuple[float, str]:
     tuples = node["Plan Rows"]
     width = node["Plan Width"]
@@ -142,11 +149,14 @@ def explain_materialize(node: dict) -> tuple[float, str]:
     work_mem_bytes = float(cache.get_setting("work_mem")) * 1024
     cpu_operator_cost = float(cache.get_setting("cpu_operator_cost"))
     seq_page_cost = float(cache.get_setting("seq_page_cost"))
+
+    # 23 is the size of the HeapTupleHeader
     nbytes = tuples * (align(width, 8) + align(23, 8))
     explanation += f"Materialize charges 2 * cpu_operator_cost ({cpu_operator_cost}) per tuple as overhead. There are {tuples} tuple(s)\n"
     cost = 2 * cpu_operator_cost * tuples
     block_size = float(cache.get_setting("block_size"))
-
+    
+    # spill cost
     if nbytes > work_mem_bytes:
         explanation += f"The relation to materialize is larger that working memory space of {work_mem_bytes / 1024}KB\n"
         npages = math.ceil(nbytes/block_size)
@@ -158,6 +168,7 @@ def explain_materialize(node: dict) -> tuple[float, str]:
     return (cost + child['Total Cost'], explanation)
 
 # explanation function for Merge Append
+# adapted from cost_merge_append in src/backend/optimizer/path/costsize.c
 def explain_merge_append(node: dict) -> tuple[float, str]:
     cpu_operator_cost = float(cache.get_setting("cpu_operator_cost"))
     cpu_tuple_cost = float(cache.get_setting("cpu_tuple_cost"))
@@ -180,31 +191,41 @@ def explain_merge_append(node: dict) -> tuple[float, str]:
 
     return (startup_cost + run_cost + sum(child["Total Cost"] for child in node.get("Plans", [])), explanation)
 
-# explanation function for Appen
+# explanation function for Append
+# adapted form cost_append in src/backend/optimizer/path/costsize.c
 def explain_append(node: dict) -> tuple[float, str]:
     # gather child costs
+    comment = ""
     cpu_tuple_cost = float(cache.get_setting("cpu_tuple_cost"))
     child_costs = [child["Total Cost"] for child in node.get("Plans", [])]
     child_startup_costs = [child["Startup Cost"] for child in node.get("Plans", [])]
     row_count = node["Plan Rows"]
 
+    # just in case
     if not child_costs: 
         return (0, "No child plans for this Append node.")
 
     min_startup_cost = min(child_startup_costs)
     total_cost = sum(child_costs) + cpu_tuple_cost * row_count * 0.5  # 0.5 is APPEND_CPU_COST_MULTIPLIER
-    total_cost=round(total_cost, 1)   #check issue with decimal without round
 
     #explanation:
     explanation = f"Append node combines several plans. The startup cost is the minimum of the startup costs of its children, and the total cost includes CPU costs associated with processing rows.\n"
     explanation += f"Child startup costs: {child_startup_costs}\n"
     explanation += f"Child total costs: {child_costs}\n"
     explanation += f"Estimated row count: {row_count}\n"
-    explanation += f"Minimum startup cost: {min_startup_cost}, Adjusted total cost: {total_cost} (including CPU cost for handling rows)"
+    explanation += f"Minimum startup cost: {min_startup_cost}, Adjusted total cost: {total_cost:.2f} (including CPU cost for handling rows)"
 
-    return (total_cost, explanation)
+    # append does not account for parallelisation as of now
+    expected_cost = node["Total Cost"]
+    if truncate_cost(total_cost) != expected_cost and node["Parallel Aware"]:
+        comment = "Our calculation for the append does not consider the effect of parallelisation.\n"
+        comment += "This involves the knowledge of partial and non-partial paths.\n"
+        comment += f"The cost is likely the sum of any of the {len(node["Plans"])} child nodes + the cpu processing cost of {cpu_tuple_cost * row_count * 0.5}."
+
+    return (total_cost, explanation, comment)
 
 # explanation function for Gather
+# adapted from cost_gather in src/backend/optimizer/path/costsize.c
 def explain_gather(node: dict) -> tuple[float, str]:
     parallel_setup_cost = float(cache.get_setting("parallel_setup_cost"))
     parallel_tuple_cost = float(cache.get_setting("parallel_tuple_cost"))
@@ -238,6 +259,7 @@ def explain_gather(node: dict) -> tuple[float, str]:
     return (total_cost, explanation)
 
 # explanation function for Merge
+# adapted from cost_gather_merge in src/backend/optimizer/path/costsize.c
 def explain_gather_merge(node: dict) -> tuple[float, str]:
     parallel_setup_cost = float(cache.get_setting("parallel_setup_cost"))
     parallel_tuple_cost = float(cache.get_setting("parallel_tuple_cost"))
@@ -260,6 +282,8 @@ def explain_gather_merge(node: dict) -> tuple[float, str]:
 
     run_cost = rows * comparison_cost * logN
     run_cost += cpu_operator_cost * rows
+    
+    # 1.05 is the penalty cost directly taken from the source code
     run_cost += parallel_tuple_cost * rows * 1.05
     explanation += f"A per-tuple heap maintaince cost of comparison_cost * log2(N) applied.\n"
     explanation += f"cpu_operator_cost ({cpu_operator_cost}) is also applied per tuple for heap management overhead\n"
@@ -269,6 +293,7 @@ def explain_gather_merge(node: dict) -> tuple[float, str]:
     return (startup_cost + run_cost + subpath_total_cost, explanation)
 
 # explanation function for Limit
+# adapted from adjust_limit_rows_costs in src/backend/optimizer/util/pathnode.c
 def explain_limit(node: dict) -> tuple[float, str]:
     if 'Plans' not in node or len(node['Plans']) != 1:
         return (0, "Limit node must have exactly one child plan.")
@@ -281,7 +306,6 @@ def explain_limit(node: dict) -> tuple[float, str]:
 
     # Get the limit value
     limit_count = node.get('Plan Rows', child_plan_rows)  # Default to all rows if no limit specified
-
     
     if limit_count < child_plan_rows:
         cost_per_row = (child_total_cost - child_startup_cost) / child_plan_rows if child_plan_rows else 0
@@ -299,6 +323,7 @@ def explain_limit(node: dict) -> tuple[float, str]:
     return (total_cost, explanation)
 
 # explanation function for Index Scan
+# attempted to adapt from cost_index in rc/backend/optimizer/path/costsize.c
 def explain_indexscan(node: dict) -> tuple[float, str]:
     index_name = node.get("Index Name", "unknown index")
     index_page_count = cache.get_page_count(index_name)  
@@ -341,7 +366,7 @@ def explain_indexscan(node: dict) -> tuple[float, str]:
 
     return (total_cost, explanation)
 
-# adapted from src/backend/optimizer/path/costsize.c
+# adapted from index_pages_fetched in rc/backend/optimizer/path/costsize.c
 def index_pages_fetched(tuples_fetched, table_pages, index_pages, effective_cache_size) -> float:
     T = max(table_pages, 1)
     b = effective_cache_size  
@@ -357,27 +382,35 @@ def index_pages_fetched(tuples_fetched, table_pages, index_pages, effective_cach
     return math.ceil(pages_fetched)
 
 # explanation function for Result
+# adapted from cost_resultscan in src/backend/optimizer/path/costsize.c
 def explain_result(node: dict) -> tuple[float, str, str]:
     expected_cost = node["Total Cost"]
     tuples = node["Plan Rows"]
     comment = ""
+    # cost is usually the same as the child
     if "Plans" in node:
         cost = node["Plans"][0]["Total Cost"]
         explanation = "Result usually has additional no cost associated with it."
+        
+        # in case there are filters or functions
         if expected_cost > cost:
             comment = f"Perhaps there is a filtering cost of {(expected_cost - cost) / tuples} being applied per tuple. There are {tuples} tuple(s)"
         return (cost, explanation, comment)
     else:
+        # dummy case (plain SELECT)
         if expected_cost == 0:
             return (0, "Result usually has additional no cost associated with it.")
         cpu_tuple_cost = float(cache.get_setting("cpu_tuple_cost"))
         explanation = f"Result incurs cpu_tuple_cost ({cpu_tuple_cost}) per tuple. There are {tuples} tuple(s)"
         cost = truncate_cost(cpu_tuple_cost * tuples)
+
+        # in case there are filters or functions
         if expected_cost != cost:
             comment = f"Perhaps the cost per tuple here is {(expected_cost - cost) / tuples} instead."
         return (cost, explanation, comment)
 
 # explanation function for Sort
+# adapted from cost_sort in src/backend/optimizer/path/costsize.c
 def explain_sort(node: dict) -> tuple[float, str]:
     tuples = node["Plan Rows"]
     width = node["Plan Width"]
@@ -410,7 +443,10 @@ def explain_sort(node: dict) -> tuple[float, str]:
     return total_cost, explanation
 
 
+# for BitmapOr and BitmapAnd, the child bitmap costs are adapted from cost_bitmap_tree_node in src/backend/optimizer/path/costsize.c
+
 # explanation function for BitmapOr
+# adapted from cost_bitmap_or_node in src/backend/optimizer/path/costsize.c
 def explain_bitmap_or(node: dict) -> tuple[float, str]:
     cpu_operator_cost = float(cache.get_setting("cpu_operator_cost"))
     cost = sum([child["Total Cost"] for child in node.get("Plans", [])])
@@ -419,6 +455,9 @@ def explain_bitmap_or(node: dict) -> tuple[float, str]:
     num_index = 0
     num_cost = 0
     first = True
+
+    # children can be bitmap index scan, bitmapAnd, bitmapOr
+    # they are treated with slight differences
     for child in node["Plans"]:
         if child["Node Type"] == "Bitmap Index Scan":
             cost += tuples * cpu_operator_cost * 0.1
@@ -438,12 +477,14 @@ def explain_bitmap_or(node: dict) -> tuple[float, str]:
     return (cost, explanation)
 
 # explanation function for BitmapAnd
+# adapted from cost_bitmap_and_node in src/backend/optimizer/path/costsize.c
 def explain_bitmap_and(node: dict) -> tuple[float, str]:
     cpu_operator_cost = float(cache.get_setting("cpu_operator_cost"))
     cost = sum([child["Total Cost"] for child in node.get("Plans", [])])
     tuples = node["Plan Rows"]
 
     num_index = 0
+    # more cost is added for bitmap index children
     for child in node["Plans"]:
         if child["Node Type"] == "Bitmap Index Scan":
             cost += tuples * cpu_operator_cost * 0.1
@@ -459,6 +500,7 @@ def explain_bitmap_and(node: dict) -> tuple[float, str]:
     return (cost, explanation)
 
 # explanation function for Group
+# adapted from cost_group in src/backend/optimizer/path/costsize.c
 def explain_group(node: dict) -> tuple[float, str]:
     cpu_operator_cost = float(cache.get_setting("cpu_operator_cost"))
     numGroupCols = len(node["Group Key"])
@@ -468,6 +510,7 @@ def explain_group(node: dict) -> tuple[float, str]:
     explanation = f"There is no additional startup cost for the Group operator\n"
     explanation = f"cpu_operator_cost ({cpu_operator_cost}) is incurred for every input tuple ({input_tuples}) and grouping clause ({numGroupCols}) combination\n"
 
+    # HAVING clauses. paid per output row
     if "Filter" in node:
         filters = count_clauses(node["Filter"])
         cpu_operator_cost = float(cache.get_setting("cpu_operator_cost"))
@@ -477,9 +520,19 @@ def explain_group(node: dict) -> tuple[float, str]:
 
     explanation += f"The additional cost comes out to be {total_cost:.2f}"
 
-    return (total_cost + node["Plans"][0]["Total Cost"], explanation)
+    child_cost = node["Plans"][0]["Total Cost"]
+
+        # Best we can do given both the filtering cost could be wrong or the number of output tuples is unreliable
+    expected_cost = node["Total Cost"] - child_cost
+    comment = ""
+    if truncate_cost(total_cost) != expected_cost:
+        comment = "The Group operator may involve HAVING clauses with differnet cost functions.\n"
+        comment += "The output rows are reduced with each clause, costs may have been applied to a larger number of rows than returned."
+
+    return (total_cost + child_cost, explanation, comment)
 
 # explanation function for Lockrows
+# adapted from create_lockrows_path in src/backend/optimizer/util/pathnode.c
 def explain_lockrows(node: dict) -> tuple[float, str]:
     cpu_tuple_cost = float(cache.get_setting("cpu_tuple_cost"))
     tuples = node["Plans"][0]["Plan Rows"]
@@ -498,6 +551,7 @@ def clean_output(output: list) -> list:
     return output
 
 # explanation function for SetOp
+# adapted from create_setop_path in src/backend/optimizer/util/pathnode.c
 def explain_setop(node: dict) -> tuple[float, str]:
     cpu_operator_cost = float(cache.get_setting("cpu_operator_cost"))
     subpath_cost = node["Plans"][0]["Total Cost"]
@@ -508,9 +562,18 @@ def explain_setop(node: dict) -> tuple[float, str]:
     total_cost *= len_distinct
     explanation += f"cpu_operator_cost ({cpu_operator_cost}) is incurred for every row ({tuples}) and distinct column ({len_distinct}) combination\n"
     explanation += f"This adds a cost of {total_cost}"
-    return (total_cost + subpath_cost, explanation)
+
+    # this is likely the issue given no filtering/functions are involved.
+    comment = ""
+    expected_cost = node["Total Cost"] - subpath_cost
+    if truncate_cost(total_cost) != expected_cost:
+        comment = "The number of distinct columns may have been calculated incorrectly.\n"
+        comment += f"It should have been {round(expected_cost/(cpu_operator_cost * tuples))}"
+
+    return (total_cost + subpath_cost, explanation, comment)
 
 # explanation function for Subquery Scan
+# adapted from cost_subqueryscan in src/backend/optimizer/path/costsize.c
 def explain_subqueryscan(node: dict) -> tuple[float, str]:
     explanation = f"There is no additional startup cost for the Subquery Scan operator\n"
     cpu_tuple_cost = float(cache.get_setting("cpu_tuple_cost"))
@@ -519,9 +582,18 @@ def explain_subqueryscan(node: dict) -> tuple[float, str]:
     total_cost = cpu_tuple_cost * tuples
     explanation += f"cpu_tuple_cost ({cpu_tuple_cost}) is incurred for every input row ({tuples})\n"
     explanation += f"This adds a cost of {total_cost}"
-    return (total_cost + subpath_cost, explanation)
+
+    expected_cost = node["Total Cost"] - subpath_cost
+
+    # filtering 
+    comment = ""
+    if truncate_cost(total_cost) != expected_cost:
+        comment = "There may have been additional costs (filtering/functions) that may not have been accounted for.\n"
+        comment += f"An additional cost of {truncate((expected_cost/tuples) - cpu_tuple_cost)} should have been applied per tuple."
+    return (total_cost + subpath_cost, explanation, comment)
 
 # explanation function for Value Scan
+# adapted from cost_valuesscan in src/backend/optimizer/path/costsize.c
 def explain_valuescan(node: dict) -> tuple[float, str]:
     explanation = f"There is no startup cost for the Subquery Scan operator\n"
     cpu_operator_cost = float(cache.get_setting("cpu_operator_cost"))
@@ -530,14 +602,24 @@ def explain_valuescan(node: dict) -> tuple[float, str]:
     total_cost = (cpu_operator_cost + cpu_tuple_cost) * tuples
     explanation += f"cpu_tuple_cost ({cpu_tuple_cost}) and cpu_operator_cost ({cpu_operator_cost}) is incurred for every input row ({tuples})\n"
     explanation += f"The total cost is {total_cost}"
+
+    expected_cost = node["Total Cost"]
+
+    # filtering again
+    comment = ""
+    if truncate_cost(total_cost) != expected_cost:
+        comment = "There may have been additional costs (filtering/functions) that may not have been accounted for.\n"
+        comment += f"An additional cost of {truncate((expected_cost/tuples) - (cpu_tuple_cost + cpu_operator_cost))} should have been applied per tuple."
     return (total_cost, explanation)
 
 # explanation function for Modify Table
+# adapted from create_modifytable_path in src/backend/optimizer/util/pathnode.c
 def explain_modify_table(node: dict) -> tuple[float, str]:
     explanation = f"There is no cost associated with this node."
     return (node["Plans"][0]["Total Cost"], explanation)
 
 # explanation function for ProjectSet
+# adapted from create_set_projection_path in src/backend/optimizer/util/pathnode.c
 def explain_project_set(node: dict) -> tuple[float, str]:
     explanation = f"There is no startup cost for the ProjectSet operator\n"
     cpu_tuple_cost = float(cache.get_setting("cpu_tuple_cost"))
@@ -554,6 +636,7 @@ def explain_project_set(node: dict) -> tuple[float, str]:
     return (run_cost + subpath_cost, explanation)
 
 # explanation function for Recursive Union
+# adapted from cost_recursive_union in src/backend/optimizer/path/costsize.c
 def explain_recursive_union(node: dict) -> tuple[float, str]:
     explanation = f"There is no startup cost for the Recursive Union operator\n"
     nterm = node["Plans"][0]
@@ -562,6 +645,7 @@ def explain_recursive_union(node: dict) -> tuple[float, str]:
     total_cost = nterm["Total Cost"]
     explanation += f"The initial cost is the same as the non-recursive term ({total_cost})\n"
 
+    # 10 is the assumed max recursion depth (or the number of loops to be executed)
     total_cost += 10 * rterm["Total Cost"]
     explanation += f"Assuming 10 recursions, the cost of the recursive term ({rterm['Total Cost']}) is added 10 times\n"
 
@@ -578,7 +662,9 @@ def explain_hash(node: dict) -> tuple[float, str]:
     return (node["Plans"][0]["Total Cost"], explanation)
 
 # explanation function for Aggregate
-def explain_aggregate(node: dict) -> tuple[float, str, str]: #not done, no of workers not accounted
+# attempted to adapt from cost_agg in src/backend/optimizer/path/costsize.c
+# it is missing the disk spill costs for hash/mixed strategies
+def explain_aggregate(node: dict) -> tuple[float, str, str]: 
     cpu_operator_cost = float(cache.get_setting("cpu_operator_cost"))
     cpu_tuple_cost = float(cache.get_setting("cpu_tuple_cost"))
     child = node["Plans"][0]
@@ -586,12 +672,15 @@ def explain_aggregate(node: dict) -> tuple[float, str, str]: #not done, no of wo
     child_tuples = child["Plan Rows"]
     strategy = node["Strategy"]
     total_cost = child_cost
+
+    # plain agg is simple
     if strategy == "Plain":
         explanation = f"In Plain Aggregation, there is no grouping involved.\n"
         explanation += f"The startup cost is the total cost of the child node.\n"
         explanation += f"cpu_tuple_cost ({cpu_tuple_cost} is added to the the total cost.\n"
         return (total_cost + cpu_tuple_cost, explanation)
 
+    # just in case
     numGroupCols = len(node["Group Key"]) if "Group Key" in node else len(clean_output(node["Output"]))
     total_cost += cpu_operator_cost * numGroupCols * child_tuples
     total_cost += cpu_tuple_cost * node["Plan Rows"]
@@ -601,6 +690,7 @@ def explain_aggregate(node: dict) -> tuple[float, str, str]: #not done, no of wo
     
     comment = ""
 
+    # sorted, mixed, and hashed have the same base total cost (hash has computation cost charged during startup instead)
     if strategy == "Sorted" or strategy == "Mixed":
         explanation = f"When sorting, no additional startup cost is incurred.\n"
         explanation += f"cpu_operator_cost ({cpu_operator_cost}) * length of grouping keys ({numGroupCols}) is charged for each input tuple\n"
@@ -611,6 +701,10 @@ def explain_aggregate(node: dict) -> tuple[float, str, str]: #not done, no of wo
         explanation += f"cpu_tuple_cost ({cpu_tuple_cost}) is charged for each output tuple\n"
         explanation += f"cpu_operator_cost also charged to each input and output tuple as aggregation cost."
 
+    # disk spill costs not accounted for given the estimate is likely to be incorrect anyway
+
+    # every aggregation has its own trans and final costs. we don't know what they are
+    # modest assumption is one aggregation charging cpu_operator_cost for trans and final each
     expected_cost = node["Total Cost"]
     if truncate_cost(total_cost) != expected_cost:
         comment = "The assumption of 1 cpu_operator_cost to each input & output tuple is likely to be an underestimate.\n"
@@ -638,6 +732,7 @@ def find_relation_name(plan):
     return None 
 
 # explanation function for Nested Loop
+# attempted to adapt from initial_cost_nestloop and final_cost_nestloop in src/backend/optimizer/path/costsize.c
 def explain_nestedloop(node: dict) -> str:
     cpu_tuple_cost = float(cache.get_setting("cpu_tuple_cost"))
     # Extracting costs and rows from the node dictionary
@@ -770,6 +865,7 @@ def explain_nestedloop(node: dict) -> str:
     return total_cost, explanation
 
 # explanation function for Hash Join
+# attempted to adapt from initial_cost_hashjoin and final_cost_hashjoin in src/backend/optimizer/path/costsize.c
 def explain_hash_join(node: dict) -> tuple[float, str]:
     # Configuration settings
     cpu_operator_cost = float(cache.get_setting("cpu_operator_cost"))
@@ -887,6 +983,8 @@ def explain_mergejoinlect(node: dict) -> str: #refined sort-merge join
     return startup_cost + run_cost, explanation
 
 # explanation function for Unique
+# adapted from create_upper_unique_path and create_unique_path in src/backend/optimizer/util/pathnode.c
+# assumption here is if hashing is used then an aggregate will show up instead of unique
 def explain_unique(node: dict) -> tuple[float, str]:
     cpu_operator_cost = float(cache.get_setting("cpu_operator_cost"))
     subpath = node["Plans"][0]
