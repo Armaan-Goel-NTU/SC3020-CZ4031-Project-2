@@ -749,7 +749,38 @@ def explain_hashjoinlect(node: dict) -> str: #grace hash join
     explanation += f"- The run cost will be the seq_page_cost({seq_page_cost}) of accessing all the blocks"
     return startup_cost + run_cost, explanation
 
+def explain_mergejoinlect(node: dict) -> str: #refined sort-merge join
+    seq_page_cost = float(cache.get_setting("seq_page_cost"))
+    outer_path = [child for child in node["Plans"] if child["Parent Relationship"] == "Outer"][0]
+    inner_path = [child for child in node["Plans"] if child["Parent Relationship"] == "Inner"][0]
+    outer_path_rows = outer_path["Plan Rows"]
+    inner_path_rows = inner_path["Plan Rows"]
+    inputbuffers = get_m()
+    cpu_block_size = float(cache.get_setting('block_size'))
+                           
+    # Calculate the startup and run costs
+    startup_cost = 0
+    run_cost = 0
 
+    # Startup cost
+    startup_cost = node.get('Startup Cost', 1.56)
+
+    # Calculate the run cost of the inner relation excluding startup cost
+    outer_blocks = math.ceil(outer_path_rows * outer_path["Plan Width"] / cpu_block_size)
+    inner_blocks = math.ceil(inner_path_rows * inner_path["Plan Width"] / cpu_block_size)
+    blocks_accessed = 3 * (outer_blocks + inner_blocks)
+    run_cost += blocks_accessed * seq_page_cost
+
+
+    # Prepare explanation
+    explanation = f"The startup and total costs for merge join are as follows:\n"
+    explanation += f"Startup cost: {startup_cost}\n"
+    explanation += f"Total cost is the startup cost and run cost: {startup_cost + run_cost}\n"
+    explanation += f"- Following the formula of 3(B(R) + B(S))\n"
+    explanation += f"- B(outerloop) = {outer_blocks}, B(innerloop) = {inner_blocks}, and M = {inputbuffers}\n"
+    explanation += f"- The run cost will be the seq_page_cost({seq_page_cost}) of accessing all the blocks"
+    return startup_cost + run_cost, explanation
+    
 # def explain_hash_join(node: dict) -> str:
 #     cpu_operator_cost = float(cache.get_setting("cpu_operator_cost"))
 #     cpu_tuple_cost = float(cache.get_setting("cpu_tuple_cost"))
@@ -1018,7 +1049,7 @@ def explain_windowagg(node: dict):
 
 fn_dict = {
     "Nested Loop": explain_nestedlooplect,
-    "Merge Join": None,
+    "Merge Join": explain_mergejoinlect,
     "Hash Join": explain_hashjoinlect,
     "Index Scan": explain_indexscan,
     "Index Only Scan": None,
