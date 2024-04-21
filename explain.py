@@ -3,6 +3,7 @@ import psycopg
 import re
 import math
 import decimal
+import json
 
 def truncate_cost(a : float) -> float:
     return round(a, 2)
@@ -464,7 +465,6 @@ def explain_group(node: dict) -> tuple[float, str]:
 
     return (total_cost + node["Plans"][0]["Total Cost"], explanation)
 
-#TODO find a query that uses lockrows
 def explain_lockrows(node: dict) -> tuple[float, str]:
     cpu_tuple_cost = float(cache.get_setting("cpu_tuple_cost"))
     tuples = node["Plans"][0]["Plan Rows"]
@@ -613,7 +613,7 @@ def find_relation_name(plan):
 
     return None 
 
-def explain_nestedloop_new(node: dict) -> str:
+def explain_nestedloop(node: dict) -> str:
     cpu_tuple_cost = float(cache.get_setting("cpu_tuple_cost"))
     # Extracting costs and rows from the node dictionary
     outer_plan = node['Plans'][0]
@@ -1076,17 +1076,17 @@ def explain_windowagg(node: dict) -> tuple[float, str, str]:
     return (total_cost + child_cost, explanation, comment)
 
 fn_dict = {
-    "Nested Loop": explain_nestedloop_new,
+    "Nested Loop": explain_nestedloop,
     "Merge Join": explain_mergejoinlect,
     "Hash Join": explain_hashjoinlect,
+
     "Index Scan": explain_indexscan,
     "Index Only Scan": None,
     "Bitmap Index Scan": None,
     "Bitmap Heap Scan": None,
-    "Incremental Sort": None,
+
     "Aggregate": explain_aggregate,
     "WindowAgg": explain_windowagg,
-
     "Result": explain_result,
     "ProjectSet": explain_project_set,
     "ModifyTable": explain_modify_table,
@@ -1121,6 +1121,7 @@ fn_dict = {
     # not worth it
     "Foreign Scan": None,
     "Custom Scan": None,
+    "Incremental Sort": None
 }
 
 class Connection():
@@ -1159,12 +1160,12 @@ class Connection():
                 explanation = params[1]
                 color = "c0ebcc" if cost == expected_cost else "ebc6c0"
                 explanation = f"<b>Calculated Cost</b>: <span style=\"background-color:#{color};\">{cost}</span>\n<b>Explanation</b>: {explanation}"
-                if len(params) > 2 and len(params[2]) > 0:
-                    explanation += f"\n<b>Comments</b>: {params[2]}"
-                elif cost != expected_cost:
+                if cost != expected_cost:
                     diff = truncate(abs(full_cost - expected_cost))
                     if diff <= 0.05:
                         explanation += f"\n<b>Comments</b>: Calculated cost is off by {diff:.4f}, which is most likely a rounding error."
+                    elif len(params) > 2 and len(params[2]) > 0:
+                        explanation += f"\n<b>Comments</b>: {params[2]}"
                 return explanation
             except Exception as e:
                 return f"<b>Comment</b>: Encountered an error when generating an explanation. {str(e)}"
@@ -1186,6 +1187,8 @@ class Connection():
             return f"Error: {str(e)}"
         
         plan = cur.fetchall()[0][0][0]['Plan']
+        with open("plan.json","w") as f:
+            f.write(json.dumps(plan, indent=2))
         node_stack = deque()
 
         log_cb("Pushing Workers Planned Down")
