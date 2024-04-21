@@ -3,6 +3,7 @@ import psycopg
 import re
 import math
 import decimal
+import json
 
 def truncate_cost(a : float) -> float:
     return round(a, 2)
@@ -464,7 +465,6 @@ def explain_group(node: dict) -> tuple[float, str]:
 
     return (total_cost + node["Plans"][0]["Total Cost"], explanation)
 
-#TODO find a query that uses lockrows
 def explain_lockrows(node: dict) -> tuple[float, str]:
     cpu_tuple_cost = float(cache.get_setting("cpu_tuple_cost"))
     tuples = node["Plans"][0]["Plan Rows"]
@@ -596,76 +596,8 @@ def explain_aggregate(node: dict) -> tuple[float, str, str]: #not done, no of wo
 
     return (total_cost, explanation, comment)
 
-def explain_nestedloop(node: dict) -> str: #total cost is wrong
-    cpu_operator_cost = float(cache.get_setting("cpu_operator_cost"))
-    cpu_tuple_cost = float(cache.get_setting("cpu_tuple_cost"))
-    outer_path = node["Plans"][0]
-    inner_path = node["Plans"][1]
-    outer_path_rows = outer_path["Plan Rows"]
-    inner_path_rows = inner_path["Plan Rows"]
-
-    # Calculate the startup and run costs
-    startup_cost = 0
-    run_cost = 0
-
-    # Startup cost includes the startup cost of both outer and inner paths
-    startup_cost += outer_path["Startup Cost"] + inner_path["Startup Cost"]
-
-    # Run cost includes the total cost of the outer path excluding startup cost
-    run_cost += outer_path["Total Cost"] - outer_path["Startup Cost"]
-
-    # Calculate the run cost of the inner relation excluding startup cost
-    inner_run_cost = inner_path["Total Cost"] - inner_path["Startup Cost"]
-    run_cost += inner_run_cost
-
-    run_cost += cpu_tuple_cost * outer_path_rows * inner_path_rows
-    run_cost += cpu_tuple_cost * node["Plan Rows"]
-
-    # Prepare explanation
-    explanation = f"The startup and total costs for the Nested Loop join are as follows:\n"
-    explanation += f"Startup cost: {startup_cost}\n"
-    explanation += f"Total cost: {startup_cost + run_cost}\n"
-    explanation += f"- Startup cost includes the startup cost of both outer and inner paths\n"
-    explanation += f"- Total cost includes the total cost of the outer path excluding startup cost\n"
-    explanation += f"- Total cost also includes the cpu_tuple_cost ({cpu_tuple_cost}) of matching each tuples between outer and inner tuples\n"
-    explanation += f"- Total cost also includes the cpu_tuple_cost ({cpu_tuple_cost}) of processing every resulting output row"
-    return startup_cost + run_cost, explanation
-
 def get_m() -> float:
     return float(cache.get_setting('work_mem')) * 1024 / float(cache.get_setting('block_size'))
-
-def explain_nestedlooplect(node: dict) -> tuple[float, str]:
-    seq_page_cost = float(cache.get_setting("seq_page_cost"))
-    outer_path = [child for child in node["Plans"] if child["Parent Relationship"] == "Outer"][0]
-    inner_path = [child for child in node["Plans"] if child["Parent Relationship"] == "Inner"][0]
-    outer_path_rows = outer_path["Plan Rows"]
-    inner_path_rows = inner_path["Plan Rows"]
-    inputbuffers = get_m()
-    cpu_block_size = float(cache.get_setting('block_size'))
-                           
-    # Calculate the startup and run costs
-    startup_cost = 0
-    run_cost = 0
-
-    # Startup cost includes the startup cost of both outer and inner paths
-    startup_cost += outer_path["Startup Cost"] + inner_path["Startup Cost"]
-
-    # Calculate the run cost of the inner relation excluding startup cost
-    outer_blocks = math.ceil(outer_path_rows * outer_path["Plan Width"] / cpu_block_size)
-    inner_blocks = math.ceil(inner_path_rows * inner_path["Plan Width"] / cpu_block_size)
-    blocks_accessed = outer_blocks + ((outer_blocks * inner_blocks) / (inputbuffers - 1))
-    run_cost += blocks_accessed * seq_page_cost
-
-
-    # Prepare explanation
-    explanation = f"The startup and total costs for the Nested Loop join are as follows:\n"
-    explanation += f"Startup cost: {startup_cost}\n"
-    explanation += f"Total cost is the startup cost and run cost: {startup_cost + run_cost}\n"
-    explanation += f"- Startup cost includes the startup cost of both outer and inner paths\n"
-    explanation += f"- Following the formula of B(S) + B(S)B(M)/(M-1)\n"
-    explanation += f"- B(outerloop) = {outer_blocks}, B(innerloop) = {inner_blocks}, and M = {inputbuffers}\n"
-    explanation += f"- The run cost will be the seq_page_cost({seq_page_cost}) of accessing all the blocks"
-    return startup_cost + run_cost, explanation
 
 def find_relation_name(plan):
     # Check if the current node directly has a 'Relation Name'
@@ -681,7 +613,7 @@ def find_relation_name(plan):
 
     return None 
 
-def explain_nestedloop_new(node: dict) -> str:
+def explain_nestedloop(node: dict) -> str:
     cpu_tuple_cost = float(cache.get_setting("cpu_tuple_cost"))
     # Extracting costs and rows from the node dictionary
     outer_plan = node['Plans'][0]
@@ -1144,17 +1076,17 @@ def explain_windowagg(node: dict) -> tuple[float, str, str]:
     return (total_cost + child_cost, explanation, comment)
 
 fn_dict = {
-    "Nested Loop": explain_nestedloop_new,
+    "Nested Loop": explain_nestedloop,
     "Merge Join": explain_mergejoinlect,
     "Hash Join": explain_hashjoinlect,
+
     "Index Scan": explain_indexscan,
     "Index Only Scan": None,
     "Bitmap Index Scan": None,
     "Bitmap Heap Scan": None,
-    "Incremental Sort": None,
+
     "Aggregate": explain_aggregate,
     "WindowAgg": explain_windowagg,
-
     "Result": explain_result,
     "ProjectSet": explain_project_set,
     "ModifyTable": explain_modify_table,
@@ -1189,6 +1121,7 @@ fn_dict = {
     # not worth it
     "Foreign Scan": None,
     "Custom Scan": None,
+    "Incremental Sort": None
 }
 
 class Connection():
@@ -1227,12 +1160,12 @@ class Connection():
                 explanation = params[1]
                 color = "c0ebcc" if cost == expected_cost else "ebc6c0"
                 explanation = f"<b>Calculated Cost</b>: <span style=\"background-color:#{color};\">{cost}</span>\n<b>Explanation</b>: {explanation}"
-                if len(params) > 2 and len(params[2]) > 0:
-                    explanation += f"\n<b>Comments</b>: {params[2]}"
-                elif cost != expected_cost:
+                if cost != expected_cost:
                     diff = truncate(abs(full_cost - expected_cost))
                     if diff <= 0.05:
                         explanation += f"\n<b>Comments</b>: Calculated cost is off by {diff:.4f}, which is most likely a rounding error."
+                    elif len(params) > 2 and len(params[2]) > 0:
+                        explanation += f"\n<b>Comments</b>: {params[2]}"
                 return explanation
             except Exception as e:
                 return f"<b>Comment</b>: Encountered an error when generating an explanation. {str(e)}"
@@ -1254,6 +1187,8 @@ class Connection():
             return f"Error: {str(e)}"
         
         plan = cur.fetchall()[0][0][0]['Plan']
+        with open("plan.json","w") as f:
+            f.write(json.dumps(plan, indent=2))
         node_stack = deque()
 
         log_cb("Pushing Workers Planned Down")
