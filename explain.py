@@ -996,9 +996,18 @@ def explain_unique(node: dict) -> tuple[float, str]:
     explanation += f"We charge cpu_operator_cost ({cpu_operator_cost}) * number of columns ({numCols}) for each input tuple ({input_tuples}).\n"
     explanation += f"This adds {total_cost} to the total cost."
 
+    comment = ""
+    expected_cost = node["Total Cost"] - sub_cost
+    if truncate_cost(total_cost) != expected_cost:
+        comment = "The difference most likely arises from a hashing strategy.\n"
+        comment += "The strategy used applies for plain and sort-based unqiue.\n"
+        comment += "We assumed a hashed unique would show up as an aggregated instead."
+
     return (sub_cost + total_cost, explanation)
 
 # explanation function for CTE Scan
+# adapted from cost_ctescan in src/backend/optimizer/path/costsize.c
+# applies for both CTE Scan and WorkTable Scan
 def explain_cte(node : dict) -> tuple[float, str, str]:
     cpu_tuple_cost = float(cache.get_setting("cpu_tuple_cost")) 
     cost_per_tuple = cpu_tuple_cost * 2
@@ -1019,6 +1028,7 @@ def explain_cte(node : dict) -> tuple[float, str, str]:
     total_cost = rows * cost_per_tuple
     explanation += f"The cost per tuple is {cost_per_tuple}. For {rows} row(s), the total cost is {total_cost}"
 
+    # likely to happen for scans with no children, the input tuples are omitted.
     expected_cost = node["Total Cost"]
     if truncate_cost(base_cost + total_cost) != expected_cost:
         comment = "The given plan row count by PostgresSQL is not the same as the input tuples.\n"
@@ -1028,6 +1038,8 @@ def explain_cte(node : dict) -> tuple[float, str, str]:
     return (base_cost + total_cost, explanation, comment)
 
 # explanation function for Function, Table Function and Named Tuplestore Scans
+# these scans follow the same basic principles
+# adapted from cost_functionscan, cost_tablefuncscan and cost_namedtuplestorescan in src/backend/optimizer/path/costsize.c
 def explain_xyz_scan(node: dict, fn_name:str) -> tuple[float, str, str]:
     cpu_tuple_cost = float(cache.get_setting("cpu_tuple_cost")) 
     tuples = node["Plan Rows"]
@@ -1038,6 +1050,7 @@ def explain_xyz_scan(node: dict, fn_name:str) -> tuple[float, str, str]:
 
     explanation = f"{fn_name} charges cpu_tuple_cost ({cpu_tuple_cost}) per tuple ({tuples})."
 
+    # likely to happen since we are not attempting to get the function tuple costs
     if truncate_cost(total_cost) != expected_cost:
         comment = f"{fn_name} scan may involve other costs to evaluate expressesions.\n"
         comment += f"The cost per tuple should have been {expected_cost/tuples}"
@@ -1057,12 +1070,14 @@ def explain_namedtuplestorescan(node: dict) -> tuple[float, str, str]:
     return explain_xyz_scan(node, "Named Tuplestore Scan")
 
 # explanation function for Tid Scan
+# adapted from cost_tidscan in src/backend/optimizer/path/costsize.c
 def explain_tidscan(node: dict) -> tuple[float, str, str]:
     cpu_operator_cost = float(cache.get_setting("cpu_operator_cost")) 
     cpu_tuple_cost = float(cache.get_setting("cpu_tuple_cost")) 
     random_page_cost = float(cache.get_setting("random_page_cost")) 
     comment = ""
 
+    # both conditions apply
     tid_filters = count_clauses(node["TID Cond"])
     table_filters = count_clauses(node["Filter"]) if "Filter" in node else 0
 
@@ -1080,6 +1095,8 @@ def explain_tidscan(node: dict) -> tuple[float, str, str]:
 
     expected_cost = node["Total Cost"]
 
+    # tries its best to explain the difference
+    # if both are wrong then this output isn't very useful
     if truncate_cost(total_cost + startup_cost) != expected_cost:
         expected_cost -= node["Startup Cost"]
         comment = f"The difference can arise from the actual number of tuples scanned (since we only get the output rows) or the filtering cost.\n"
@@ -1098,12 +1115,14 @@ def explain_tidrangescan(node: dict) -> tuple[float, str, str]:
     relpages = cache.get_page_count(node["Relation Name"])
     comment = ""
 
+    # both conditions apply
     tid_filters = count_clauses(node["TID Cond"])
     table_filters = count_clauses(node["Filter"]) if "Filter" in node else 0
 
     explanation = f"TID Scan charges cpu_operator_cost ({cpu_operator_cost}) for every TID filter at startup ({tid_filters}).\n"
     startup_cost = cpu_operator_cost * tid_filters
     tuples = node["Plan Rows"]
+    # overall selectivity estimation
     selectivity = tuples/reltuples
     pages = math.ceil(selectivity * relpages)
     seq_pages = pages - 1
@@ -1120,10 +1139,13 @@ def explain_tidrangescan(node: dict) -> tuple[float, str, str]:
 
     expected_cost = node["Total Cost"]
 
+    # tries its best to explain the difference
+    # if both are wrong then this output isn't very useful
     if truncate_cost(total_cost + startup_cost) != expected_cost:
         expected_cost -= node["Startup Cost"]
         comment = f"The difference can arise from the actual number of tuples scanned (since we only get the output rows) or the filtering cost.\n"
         
+        # not sure how to reverse a function with math.ceil() in it, so we try to get as close of an estimate as possible instead
         e_cost = 0
         x = 1
         while e_cost < expected_cost:
@@ -1136,6 +1158,7 @@ def explain_tidrangescan(node: dict) -> tuple[float, str, str]:
     return (startup_cost + total_cost, explanation, comment)
 
 # explanation function for Sample Scan
+# adapted from cost_samplescan in src/backend/optimizer/path/costsize.c
 def explain_samplescan(node: dict) -> tuple[float, str, str]:
     relpages = cache.get_page_count(node["Relation Name"])
     reltuples = cache.get_tuple_count(node["Relation Name"])
@@ -1144,6 +1167,7 @@ def explain_samplescan(node: dict) -> tuple[float, str, str]:
     seq_page_cost = float(cache.get_setting("seq_page_cost"))
     random_page_cost = float(cache.get_setting("random_page_cost"))
 
+    # just in case
     method = node["Sampling Method"]
     if method != "bernoulli" and method != "system":
         return (0, "", "I am unaware of this sampling method. (bernoulli & system only)")
@@ -1153,13 +1177,16 @@ def explain_samplescan(node: dict) -> tuple[float, str, str]:
     explanation = f"N = {relpages}. S = {rate}.\n"
     comment = ""
     
+    # bernoulli returns pages (but scans all of them first)
     if method == "bernoulli":
         explanation = f"For Bernoulli Sampling, all pages are sequentially scanned ({relpages}). seq_scan_cost is {seq_page_cost} per page.\n"
         page_cost = relpages * seq_page_cost
+    # system returns tuples (assume random & unclustered)
     else:
         explanation = f"For System Sampling, (N * S/100) pages are scanned ({round(relpages * rate/100)}). random_page_cost is {random_page_cost} per page.\n"
         page_cost = round(relpages * rate/100) * random_page_cost
 
+    # both charge the same amount of processing cost
     cpu_per_tuple = cpu_tuple_cost
     explanation += f"(N * S/100) = {tuples} tuples will be scanned.\n"
     explanation += f"cpu_tuple_cost {cpu_tuple_cost} is charged for each scanned tuple.\n"
@@ -1172,6 +1199,7 @@ def explain_samplescan(node: dict) -> tuple[float, str, str]:
     total_cost = page_cost + cpu_per_tuple * tuples
     explanation += f"This gives the total cost as {total_cost}."
 
+    # page_cost should most likely be correct
     expected_cost = node["Total Cost"]
     if truncate_cost(total_cost) != expected_cost:
         comment = "The cost per tuple is most likely incorrect. This could be due to incorrect functions/filtering cost.\n"
@@ -1180,6 +1208,7 @@ def explain_samplescan(node: dict) -> tuple[float, str, str]:
     return (total_cost, explanation, comment)    
 
 # explanation function for Memoize
+# adapted from create_memoize_path in src/backend/optimizer/util/pathnode.c
 def explain_memoize(node: dict) -> tuple[float, str]:
     cpu_tuple_cost = float(cache.get_setting("cpu_tuple_cost"))
     explanation = f"Postgres charges cpu_tuple_cost ({cpu_tuple_cost}) at startup (and subsequently total cost) as the cost to cache the first entry.\n"
@@ -1188,6 +1217,7 @@ def explain_memoize(node: dict) -> tuple[float, str]:
     return (node["Plans"][0]["Total Cost"] + 0.01, explanation)
 
 # explanation function for Window Aggregation
+# attempted to adapt from cost_windowagg in src/backend/optimizer/path/costsize.c
 def explain_windowagg(node: dict) -> tuple[float, str, str]:
     cpu_operator_cost = float(cache.get_setting("cpu_operator_cost"))
     cpu_tuple_cost = float(cache.get_setting("cpu_tuple_cost"))
@@ -1199,11 +1229,12 @@ def explain_windowagg(node: dict) -> tuple[float, str, str]:
     explanation = f"There is no additional startup cost for the WindowAgg operator.\n"
     explanation = f"All cost is applied to the input tuples. We are assuming the minimum cost which is cpu_tuple_cost ({cpu_tuple_cost}) + 2 * cpu_operator_cost {cpu_operator_cost}."
 
+    # same issue as agg.  
+    # modest assumption is one aggregation charging cpu_operator_cost for trans and final each
     cpu_per_tuple = cpu_tuple_cost + cpu_operator_cost * 2
     total_cost = cpu_per_tuple * input_tuples
 
     comment = ""
-
     expected_cost = node["Total Cost"] - child_cost
     if truncate_cost(total_cost) != expected_cost:
         comment = f"WindowAgg charges cpu_operator_cost for every Parition and Order column. This information is not visible to us.\n"
@@ -1213,6 +1244,8 @@ def explain_windowagg(node: dict) -> tuple[float, str, str]:
     return (total_cost + child_cost, explanation, comment)
 
 # maps nodes to their explanation funcions by name
+# nodes with None are still kept here to a keep track of
+# list compiled by following ExplainNode in src/backend/commands/explain.c
 fn_dict = {
     "Nested Loop": explain_nestedloop,
     "Merge Join": explain_mergejoinlect,
