@@ -5,58 +5,79 @@ import math
 import decimal
 import json
 
+# used to round calculations. same as Postgres - 2dp
 def truncate_cost(a : float) -> float:
     return round(a, 2)
 
+# truncates to 4dp, used to show precise differences in calculations
 def truncate(a : float) -> float:
     return float(decimal.Decimal(str(a)).quantize(decimal.Decimal('.0001'), rounding=decimal.ROUND_DOWN))
 
+# we cache all the variables we get from Postgres
+# this cache lasts for each login session (cleared when disconnected)
 cache = None
 class Cache():
+    # use a simple dictionary to keep track
+    # cursor is provided to execute queries
     def __init__(self, cur: psycopg.Cursor) -> None:
         self.dict = {}
         self.cur = cur
     
+    # for settings such as cpu_tuple_cost, seq_page_cost etc.
     def query_setting(self, setting: str) -> str:
         self.cur.execute(f"SELECT setting FROM pg_settings WHERE name = '{setting}'")
         return self.cur.fetchall()[0][0]
 
+    # gets the number of pages for a base relation
     def query_pagecount(self, relation: str) -> int:
         self.cur.execute(f"SELECT relpages FROM pg_class WHERE relname = '{relation}'")
         return self.cur.fetchall()[0][0]
 
+    # gets the number of tuples for a base relation
     def query_tuplecount(self, relation: str) -> int:
         self.cur.execute(f"SELECT reltuples FROM pg_class where relname = '{relation}'")
         return self.cur.fetchall()[0][0]
     
+    # all explanation functions will call this
     def get_setting(self, setting: str) -> str:
         key = f"setting/{setting}"
+        # query only if not present currently and save output
         if key not in self.dict:
             self.log_cb(f"Querying {key}")
             self.dict[key] = self.query_setting(setting)
         return self.dict[key]
-            
+
+    # all explanation functions will call this
     def get_page_count(self, relation: str) -> int:
         key = f"relpages/{relation}"
+        # query only if not present currently and save output
         if key not in self.dict:
             self.log_cb(f"Querying {key}")
             self.dict[key] = self.query_pagecount(relation)
         return self.dict[key]        
 
+    # all explanation functions will call this
     def get_tuple_count(self, relation: str) -> int:
         key = f"reltuples/{relation}"    
+        # query only if not present currently and save output
         if key not in self.dict:
             self.log_cb(f"Querying {key}")
             self.dict[key] = self.query_tuplecount(relation)
         return self.dict[key]
     
+    # for many relations we may check to tuple count before generating explanations
+    # this is to check if auto analysis has been done
+    # more details where this is called
     def set_tuple_count(self, relation: str, count:int):
         key = f"reltuples/{relation}"
         self.dict[key] = count
     
+    # log_cb passed from interface to here. Will inform whatever it is querying
     def set_log_cb(self, log_cb: callable):
         self.log_cb = log_cb
 
+# count the number of clauses in a filter or similar condition
+# we assume clauses can only be connected by OR and AND (should be okay?)
 def count_clauses(condition: str) -> int:
     or_count = condition.count(') OR (')
     and_count = condition.count(') AND (')
@@ -64,6 +85,7 @@ def count_clauses(condition: str) -> int:
     
     return total_count
 
+# explanation function for Sequential Scan
 def explain_seqscan(node: dict) -> tuple[float, str, str]:
     cpu_tuple_cost = float(cache.get_setting("cpu_tuple_cost"))
     seq_page_cost = float(cache.get_setting("seq_page_cost"))
@@ -105,9 +127,11 @@ def explain_seqscan(node: dict) -> tuple[float, str, str]:
 
     return (cost, explanation, comment)
 
+# taken from src/include/c.h
 def align(val : int, len : int) -> int:
     return val + (len - (val % len))
 
+# explanation function for Materialize
 def explain_materialize(node: dict) -> tuple[float, str]:
     tuples = node["Plan Rows"]
     width = node["Plan Width"]
@@ -133,6 +157,7 @@ def explain_materialize(node: dict) -> tuple[float, str]:
     explanation += f"Additional cost incurred is {cost:.2f}"
     return (cost + child['Total Cost'], explanation)
 
+# explanation function for Merge Append
 def explain_merge_append(node: dict) -> tuple[float, str]:
     cpu_operator_cost = float(cache.get_setting("cpu_operator_cost"))
     cpu_tuple_cost = float(cache.get_setting("cpu_tuple_cost"))
@@ -155,7 +180,7 @@ def explain_merge_append(node: dict) -> tuple[float, str]:
 
     return (startup_cost + run_cost + sum(child["Total Cost"] for child in node.get("Plans", [])), explanation)
 
-
+# explanation function for Appen
 def explain_append(node: dict) -> tuple[float, str]:
     # gather child costs
     cpu_tuple_cost = float(cache.get_setting("cpu_tuple_cost"))
@@ -179,8 +204,8 @@ def explain_append(node: dict) -> tuple[float, str]:
 
     return (total_cost, explanation)
 
+# explanation function for Gather
 def explain_gather(node: dict) -> tuple[float, str]:
-
     parallel_setup_cost = float(cache.get_setting("parallel_setup_cost"))
     parallel_tuple_cost = float(cache.get_setting("parallel_tuple_cost"))
 
@@ -212,6 +237,7 @@ def explain_gather(node: dict) -> tuple[float, str]:
 
     return (total_cost, explanation)
 
+# explanation function for Merge
 def explain_gather_merge(node: dict) -> tuple[float, str]:
     parallel_setup_cost = float(cache.get_setting("parallel_setup_cost"))
     parallel_tuple_cost = float(cache.get_setting("parallel_tuple_cost"))
@@ -242,6 +268,7 @@ def explain_gather_merge(node: dict) -> tuple[float, str]:
 
     return (startup_cost + run_cost + subpath_total_cost, explanation)
 
+# explanation function for Limit
 def explain_limit(node: dict) -> tuple[float, str]:
     if 'Plans' not in node or len(node['Plans']) != 1:
         return (0, "Limit node must have exactly one child plan.")
@@ -271,24 +298,7 @@ def explain_limit(node: dict) -> tuple[float, str]:
     
     return (total_cost, explanation)
 
-def explain_indexscan_old(node: dict) -> str:
-    cpu_index_tuple_cost = float(cache.get_setting("cpu_index_tuple_cost"))
-    index_page_cost = float(cache.get_setting("effective_cache_size"))  # This adjusts the page cost based on caching
-
-    # Extract necessary data from the node
-    index_name = node.get("Index Name", "unknown index")
-    page_count = cache.get_page_count(index_name)  # Assuming this retrieves index-related pages
-    row_count = node["Plan Rows"]
-
-    # Calculate costs
-    cost = cpu_index_tuple_cost * row_count + index_page_cost * page_count
-    explanation = f"Index Scan on {index_name} involves a CPU cost per tuple and an I/O cost per page. " \
-                  f"Total tuples (rows) fetched: {row_count}, Index pages read: {page_count}, " \
-                  f"cpu_index_tuple_cost={cpu_index_tuple_cost}, index_page_cost={index_page_cost}. " \
-                  f"Total cost calculated: {cost}"
-    
-    return (cost, explanation)
-
+# explanation function for Index Scan
 def explain_indexscan(node: dict) -> tuple[float, str]:
     index_name = node.get("Index Name", "unknown index")
     index_page_count = cache.get_page_count(index_name)  
@@ -331,6 +341,7 @@ def explain_indexscan(node: dict) -> tuple[float, str]:
 
     return (total_cost, explanation)
 
+# adapted from src/backend/optimizer/path/costsize.c
 def index_pages_fetched(tuples_fetched, table_pages, index_pages, effective_cache_size) -> float:
     T = max(table_pages, 1)
     b = effective_cache_size  
@@ -345,7 +356,7 @@ def index_pages_fetched(tuples_fetched, table_pages, index_pages, effective_cach
             pages_fetched = b + (Ns - lim) * (T - b) / T
     return math.ceil(pages_fetched)
 
-
+# explanation function for Result
 def explain_result(node: dict) -> tuple[float, str, str]:
     expected_cost = node["Total Cost"]
     tuples = node["Plan Rows"]
@@ -366,6 +377,7 @@ def explain_result(node: dict) -> tuple[float, str, str]:
             comment = f"Perhaps the cost per tuple here is {(expected_cost - cost) / tuples} instead."
         return (cost, explanation, comment)
 
+# explanation function for Sort
 def explain_sort(node: dict) -> tuple[float, str]:
     tuples = node["Plan Rows"]
     width = node["Plan Width"]
@@ -398,7 +410,7 @@ def explain_sort(node: dict) -> tuple[float, str]:
     return total_cost, explanation
 
 
-#TODO: can make sum of children more precise (check if bitmap and/or/index for these functions)
+# explanation function for BitmapOr
 def explain_bitmap_or(node: dict) -> tuple[float, str]:
     cpu_operator_cost = float(cache.get_setting("cpu_operator_cost"))
     cost = sum([child["Total Cost"] for child in node.get("Plans", [])])
@@ -425,6 +437,7 @@ def explain_bitmap_or(node: dict) -> tuple[float, str]:
     
     return (cost, explanation)
 
+# explanation function for BitmapAnd
 def explain_bitmap_and(node: dict) -> tuple[float, str]:
     cpu_operator_cost = float(cache.get_setting("cpu_operator_cost"))
     cost = sum([child["Total Cost"] for child in node.get("Plans", [])])
@@ -445,6 +458,7 @@ def explain_bitmap_and(node: dict) -> tuple[float, str]:
     
     return (cost, explanation)
 
+# explanation function for Group
 def explain_group(node: dict) -> tuple[float, str]:
     cpu_operator_cost = float(cache.get_setting("cpu_operator_cost"))
     numGroupCols = len(node["Group Key"])
@@ -465,6 +479,7 @@ def explain_group(node: dict) -> tuple[float, str]:
 
     return (total_cost + node["Plans"][0]["Total Cost"], explanation)
 
+# explanation function for Lockrows
 def explain_lockrows(node: dict) -> tuple[float, str]:
     cpu_tuple_cost = float(cache.get_setting("cpu_tuple_cost"))
     tuples = node["Plans"][0]["Plan Rows"]
@@ -474,6 +489,7 @@ def explain_lockrows(node: dict) -> tuple[float, str]:
     explanation += f"This adds {total_cost}"
     return (total_cost + node["Plans"][0]["Total Cost"], explanation)
 
+# removes numbers or (numbers) from the output list of a node
 def clean_output(output: list) -> list:
     pattern = '^\(?-?\d+(\.\d+)?\)?$'
     for x in reversed(range(0,len(output))):
@@ -481,6 +497,7 @@ def clean_output(output: list) -> list:
             del output[x]
     return output
 
+# explanation function for SetOp
 def explain_setop(node: dict) -> tuple[float, str]:
     cpu_operator_cost = float(cache.get_setting("cpu_operator_cost"))
     subpath_cost = node["Plans"][0]["Total Cost"]
@@ -493,7 +510,7 @@ def explain_setop(node: dict) -> tuple[float, str]:
     explanation += f"This adds a cost of {total_cost}"
     return (total_cost + subpath_cost, explanation)
 
-#TODO: check if filtering needed
+# explanation function for Subquery Scan
 def explain_subqueryscan(node: dict) -> tuple[float, str]:
     explanation = f"There is no additional startup cost for the Subquery Scan operator\n"
     cpu_tuple_cost = float(cache.get_setting("cpu_tuple_cost"))
@@ -504,7 +521,7 @@ def explain_subqueryscan(node: dict) -> tuple[float, str]:
     explanation += f"This adds a cost of {total_cost}"
     return (total_cost + subpath_cost, explanation)
 
-#TODO: check if filtering needed
+# explanation function for Value Scan
 def explain_valuescan(node: dict) -> tuple[float, str]:
     explanation = f"There is no startup cost for the Subquery Scan operator\n"
     cpu_operator_cost = float(cache.get_setting("cpu_operator_cost"))
@@ -515,10 +532,12 @@ def explain_valuescan(node: dict) -> tuple[float, str]:
     explanation += f"The total cost is {total_cost}"
     return (total_cost, explanation)
 
+# explanation function for Modify Table
 def explain_modify_table(node: dict) -> tuple[float, str]:
     explanation = f"There is no cost associated with this node."
     return (node["Plans"][0]["Total Cost"], explanation)
 
+# explanation function for ProjectSet
 def explain_project_set(node: dict) -> tuple[float, str]:
     explanation = f"There is no startup cost for the ProjectSet operator\n"
     cpu_tuple_cost = float(cache.get_setting("cpu_tuple_cost"))
@@ -534,6 +553,7 @@ def explain_project_set(node: dict) -> tuple[float, str]:
     explanation += f"This adds {run_cost} to the total cost"
     return (run_cost + subpath_cost, explanation)
 
+# explanation function for Recursive Union
 def explain_recursive_union(node: dict) -> tuple[float, str]:
     explanation = f"There is no startup cost for the Recursive Union operator\n"
     nterm = node["Plans"][0]
@@ -552,10 +572,12 @@ def explain_recursive_union(node: dict) -> tuple[float, str]:
 
     return (total_cost, explanation)
 
+# explanation function for Hash
 def explain_hash(node: dict) -> tuple[float, str]:
     explanation = f"The hash operator incurs no additional cost as it builds a hash table in memory.\n"
     return (node["Plans"][0]["Total Cost"], explanation)
 
+# explanation function for Aggregate
 def explain_aggregate(node: dict) -> tuple[float, str, str]: #not done, no of workers not accounted
     cpu_operator_cost = float(cache.get_setting("cpu_operator_cost"))
     cpu_tuple_cost = float(cache.get_setting("cpu_tuple_cost"))
@@ -596,9 +618,11 @@ def explain_aggregate(node: dict) -> tuple[float, str, str]: #not done, no of wo
 
     return (total_cost, explanation, comment)
 
+# estimate the M from the lectures by using work_mem and block_size
 def get_m() -> float:
     return float(cache.get_setting('work_mem')) * 1024 / float(cache.get_setting('block_size'))
 
+# Try to find a base relation for a node
 def find_relation_name(plan):
     # Check if the current node directly has a 'Relation Name'
     if 'Relation Name' in plan:
@@ -613,6 +637,7 @@ def find_relation_name(plan):
 
     return None 
 
+# explanation function for Nested Loop
 def explain_nestedloop(node: dict) -> str:
     cpu_tuple_cost = float(cache.get_setting("cpu_tuple_cost"))
     # Extracting costs and rows from the node dictionary
@@ -744,6 +769,7 @@ def explain_nestedloop(node: dict) -> str:
 
     return total_cost, explanation
 
+# explanation function for Hash Join
 def explain_hash_join(node: dict) -> tuple[float, str]:
     # Configuration settings
     cpu_operator_cost = float(cache.get_setting("cpu_operator_cost"))
@@ -795,6 +821,7 @@ def explain_hash_join(node: dict) -> tuple[float, str]:
 
     return total_cost, explanation
 
+# explanation function for Hash Join based on lecture slides
 def explain_hashjoinlect(node: dict) -> str: #grace hash join
     seq_page_cost = float(cache.get_setting("seq_page_cost"))
     outer_path = [child for child in node["Plans"] if child["Parent Relationship"] == "Outer"][0]
@@ -827,6 +854,7 @@ def explain_hashjoinlect(node: dict) -> str: #grace hash join
     explanation += f"- The run cost will be the seq_page_cost({seq_page_cost}) of accessing all the blocks"
     return startup_cost + run_cost, explanation
 
+# explanation function for Merge Join based on lecture slides
 def explain_mergejoinlect(node: dict) -> str: #refined sort-merge join
     seq_page_cost = float(cache.get_setting("seq_page_cost"))
     outer_path = [child for child in node["Plans"] if child["Parent Relationship"] == "Outer"][0]
@@ -858,6 +886,7 @@ def explain_mergejoinlect(node: dict) -> str: #refined sort-merge join
     explanation += f"- The run cost will be the seq_page_cost({seq_page_cost}) of accessing all the blocks"
     return startup_cost + run_cost, explanation
 
+# explanation function for Unique
 def explain_unique(node: dict) -> tuple[float, str]:
     cpu_operator_cost = float(cache.get_setting("cpu_operator_cost"))
     subpath = node["Plans"][0]
@@ -871,6 +900,7 @@ def explain_unique(node: dict) -> tuple[float, str]:
 
     return (sub_cost + total_cost, explanation)
 
+# explanation function for CTE Scan
 def explain_cte(node : dict) -> tuple[float, str, str]:
     cpu_tuple_cost = float(cache.get_setting("cpu_tuple_cost")) 
     cost_per_tuple = cpu_tuple_cost * 2
@@ -899,6 +929,7 @@ def explain_cte(node : dict) -> tuple[float, str, str]:
     
     return (base_cost + total_cost, explanation, comment)
 
+# explanation function for Function, Table Function and Named Tuplestore Scans
 def explain_xyz_scan(node: dict, fn_name:str) -> tuple[float, str, str]:
     cpu_tuple_cost = float(cache.get_setting("cpu_tuple_cost")) 
     tuples = node["Plan Rows"]
@@ -915,15 +946,19 @@ def explain_xyz_scan(node: dict, fn_name:str) -> tuple[float, str, str]:
     
     return (startup_cost + total_cost, explanation, comment)
 
+# explanation function for Function Scan
 def explain_functionscan(node: dict) -> tuple[float, str, str]:
     return explain_xyz_scan(node, "Function Scan")
 
+# explanation function for Table Function Scan
 def explain_tablefunctionscan(node: dict) -> tuple[float, str, str]:
     return explain_xyz_scan(node, "Table Function Scan")
 
+# explanation function for Named Tuplestore Scan
 def explain_namedtuplestorescan(node: dict) -> tuple[float, str, str]:
     return explain_xyz_scan(node, "Named Tuplestore Scan")
 
+# explanation function for Tid Scan
 def explain_tidscan(node: dict) -> tuple[float, str, str]:
     cpu_operator_cost = float(cache.get_setting("cpu_operator_cost")) 
     cpu_tuple_cost = float(cache.get_setting("cpu_tuple_cost")) 
@@ -955,6 +990,7 @@ def explain_tidscan(node: dict) -> tuple[float, str, str]:
 
     return (startup_cost + total_cost, explanation, comment)
 
+# explanation function for Tid Range Scan
 def explain_tidrangescan(node: dict) -> tuple[float, str, str]:
     cpu_operator_cost = float(cache.get_setting("cpu_operator_cost")) 
     cpu_tuple_cost = float(cache.get_setting("cpu_tuple_cost")) 
@@ -1001,6 +1037,7 @@ def explain_tidrangescan(node: dict) -> tuple[float, str, str]:
 
     return (startup_cost + total_cost, explanation, comment)
 
+# explanation function for Sample Scan
 def explain_samplescan(node: dict) -> tuple[float, str, str]:
     relpages = cache.get_page_count(node["Relation Name"])
     reltuples = cache.get_tuple_count(node["Relation Name"])
@@ -1044,6 +1081,7 @@ def explain_samplescan(node: dict) -> tuple[float, str, str]:
 
     return (total_cost, explanation, comment)    
 
+# explanation function for Memoize
 def explain_memoize(node: dict) -> tuple[float, str]:
     cpu_tuple_cost = float(cache.get_setting("cpu_tuple_cost"))
     explanation = f"Postgres charges cpu_tuple_cost ({cpu_tuple_cost}) at startup (and subsequently total cost) as the cost to cache the first entry.\n"
@@ -1051,6 +1089,7 @@ def explain_memoize(node: dict) -> tuple[float, str]:
 
     return (node["Plans"][0]["Total Cost"] + 0.01, explanation)
 
+# explanation function for Window Aggregation
 def explain_windowagg(node: dict) -> tuple[float, str, str]:
     cpu_operator_cost = float(cache.get_setting("cpu_operator_cost"))
     cpu_tuple_cost = float(cache.get_setting("cpu_tuple_cost"))
@@ -1075,6 +1114,7 @@ def explain_windowagg(node: dict) -> tuple[float, str, str]:
 
     return (total_cost + child_cost, explanation, comment)
 
+# maps nodes to their explanation funcions by name
 fn_dict = {
     "Nested Loop": explain_nestedloop,
     "Merge Join": explain_mergejoinlect,
@@ -1119,33 +1159,43 @@ fn_dict = {
     "Hash": explain_hash,
 
     # not worth it
+    # ommited due to complexity and irrelevance to lecture content
     "Foreign Scan": None,
     "Custom Scan": None,
     "Incremental Sort": None
 }
 
+# class responsible for maintaining Postgres connection and communicating with the interface
 class Connection():
     def __init__(self) -> None:
         self.connection = None
     
+    # check if connected already
     def connected(self) -> bool:
         return self.connection is not None and not self.connection.closed
     
+    # attempt to disconnect
     def disconnect(self) -> None:
         if self.connected():
             self.connection.close()
 
+    # attempt to connect
     def connect(self, dbname:str, user:str, password:str, host:str, port:str) -> str:
+        # disconenct first 
         self.disconnect()
         try:
             self.connection = psycopg.connect(dbname=dbname, user=user, password=password, host=host, port=port)
+            # autocommit to get results instantly
             self.connection.autocommit = True
+
+            # initialize cache for this session
             global cache
             cache = Cache(self.connection.cursor())
             return ""
         except Exception as e:
             return str(e)
     
+    # responsible for calling the explanation function and adding comments as needed
     def get_explanation(self, node: dict) -> str:
         if "Total Cost" not in node:
             return "<b>Comment</b>: No cost associated with this node."
@@ -1161,74 +1211,102 @@ class Connection():
                 color = "c0ebcc" if cost == expected_cost else "ebc6c0"
                 explanation = f"<b>Calculated Cost</b>: <span style=\"background-color:#{color};\">{cost}</span>\n<b>Explanation</b>: {explanation}"
                 if cost != expected_cost:
+                    # assume rounding error by default
                     diff = truncate(abs(full_cost - expected_cost))
                     if diff <= 0.05:
                         explanation += f"\n<b>Comments</b>: Calculated cost is off by {diff:.4f}, which is most likely a rounding error."
+                    # otherwise use comments if provided
                     elif len(params) > 2 and len(params[2]) > 0:
                         explanation += f"\n<b>Comments</b>: {params[2]}"
                 return explanation
             except Exception as e:
+                # we do this instead of crashing the app in case other nodes made it
                 return f"<b>Comment</b>: Encountered an error when generating an explanation. {str(e)}"
         
+        # default
         return f"<b>Comment</b>: I really don't know how to explain the cost for this operator!"
 
+    # this is the function called by the interface
+    # force_analysis is true whenever called by the interface
     def explain(self, query:str, force_analysis:bool, log_cb: callable) -> str:
+        # save the log callback function
         self.log = log_cb
         cache.set_log_cb(log_cb)
 
-        if not self.connected():
+        # just in case
+        if not self.connected():    
             return "No database connection found! There is no context for this query."
 
+        # get the cursor and execute query
         cur = self.connection.cursor()
         log_cb("Asking Postgres for QEP")
         try:
+            # add explain automatically
+            # same behaviour as pgAdmin whereby if the user also specifies EXPLAIN, an error will be thrown
             cur.execute(f"EXPLAIN (COSTS, VERBOSE, FORMAT JSON) {query}")
         except Exception as e:
             return f"Error: {str(e)}"
         
+        # get the plan and pretty print it to the disk (useful to understand)
         plan = cur.fetchall()[0][0][0]['Plan']
         with open("plan.json","w") as f:
             f.write(json.dumps(plan, indent=2))
+
+        # we explain all nodes bottom up
+        # no real reason to do this tbh
         node_stack = deque()
 
+        # Workers Planned may be needed by different nodes, but it may only be specificed for upper nodes
         log_cb("Pushing Workers Planned Down")
         def add_nodes(node, workers):
             if "Workers Planned" in node:
                 workers = node["Workers Planned"]
             elif node["Parallel Aware"]:
+                # no point if not parallely aware
                 node["Workers Planned"] = workers
             node_stack.append(node)
             if "Plans" in node:
                 for child_plan in node["Plans"]:
                     add_nodes(child_plan, workers)
 
+        # call the recursive function
         add_nodes(plan, 1)
 
+        # for tables with no autoanalysis, we will force them to analyse the table
+        # this usually happens for small table with < 50 values (region and nation)
+        # this check is only done when called by the interface
         log_cb("Checking for missing analysis")
         if force_analysis:
+            # make a copy of the stack for traversal
             stack_copy = node_stack.copy()
             reexplain = False
             for _ in range(len(stack_copy)):
                 node = stack_copy.pop()
                 if "Relation Name" in node:
                     rel = node["Relation Name"]
+                    # we use tuplecount == -1 as a way to determine if analysis has been done
                     tuple_count = cache.query_tuplecount(rel)
                     if tuple_count == -1:
+                        # QEP needs to be re-explained
                         reexplain = True
                         log_cb(f"Analysis missing for {rel}\n")
                         try:
+                            # this should be enough for analysis to take place
                             cur.execute(f"ANALYZE {rel}")
                         except Exception as e:
                             return f"Error: {str(e)}"
                     else:
                         cache.set_tuple_count(rel, tuple_count)
-                        
+            
+            # need to regen the QEP even if one node has to be re-explained                
             if reexplain:
                 log_cb(f"Asking Postgres to generate QEP again\n")
                 return self.explain(query, False, log_cb)
-                
+
+        # add explanation for each node         
         for _ in range(len(node_stack)):
             node = node_stack.pop()
             node["Explanation"] = self.get_explanation(node)
 
+        # return plan with explanation
         return plan    
