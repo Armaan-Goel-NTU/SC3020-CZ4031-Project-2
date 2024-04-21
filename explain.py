@@ -1291,12 +1291,11 @@ fn_dict = {
     "Nested Loop": explain_nestedloop,
     "Merge Join": explain_mergejoinlect,
     "Hash Join": explain_hashjoinlect,
-
     "Index Scan": explain_indexscan,
     "Index Only Scan": None,
     "Bitmap Index Scan": None,
     "Bitmap Heap Scan": explain_bitmap_heap_scan,
-    "Incremental Sort": None,
+
     "Aggregate": explain_aggregate,
     "WindowAgg": explain_windowagg,
     "Result": explain_result,
