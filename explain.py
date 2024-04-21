@@ -985,6 +985,166 @@ def explain_windowagg(node: dict):
 
     return (total_cost + child_cost, explanation, comment)
 
+
+def explain_bitmap_heap_scan(node: dict) :
+    
+    cpu_tuple_cost = float(cache.get_setting("cpu_tuple_cost"))
+    seq_page_cost = float(cache.get_setting("seq_page_cost"))
+    random_page_cost = float(cache.get_setting("random_page_cost"))
+    work_mem = float(cache.get_setting("work_mem")) * 1024 * 1024 
+    block_size = float(cache.get_setting("block_size"))  # in bytes
+
+    # Retrieve tuple width and estimate tuples per page
+    tuple_width = node.get("Plan Width", 100)  # Default width if not provided
+    tuples_per_page = max(1, block_size // tuple_width)
+
+    # Use the estimated number of tuples to fetch to estimate pages fetched
+    tuples_fetched = node.get("Plan Rows", 0)
+    pages_fetched = min(node.get("Total Pages", 1000), max(1, tuples_fetched // tuples_per_page))
+
+    # More accurate cost per page calculation, considering nonlinear effects
+    T = node.get("Total Pages", 1000)
+    if pages_fetched >= 2.0:
+        cost_per_page = random_page_cost - (random_page_cost - seq_page_cost) * (pages_fetched / T) ** 0.5
+    else:
+        cost_per_page = random_page_cost
+
+    # Calculate I/O cost
+    io_cost = pages_fetched * cost_per_page
+
+    # Calculate CPU costs, assuming recheck of all tuples (since bitmap scans can be lossy)
+    recheck_factor = 1.0  # No lossy bitmap assumed, but still rechecking conditions
+    cpu_cost = (cpu_tuple_cost * tuples_fetched) * recheck_factor
+
+    # Sum up the costs
+    total_cost = node.get("Startup Cost", 0) + io_cost + cpu_cost
+
+    return total_cost, {
+        "pages_fetched": pages_fetched,
+        "tuples_per_page": tuples_per_page,
+        "io_cost": io_cost,
+        "cpu_cost": cpu_cost,
+        "total_cost": total_cost
+    }
+
+
+    cpu_tuple_cost = float(cache.get_setting("cpu_tuple_cost"))
+    seq_page_cost = float(cache.get_setting("seq_page_cost"))
+    random_page_cost = float(cache.get_setting("random_page_cost"))
+
+    plan_rows = node.get("Plan Rows", 0)
+    actual_rows = node.get("Actual Rows", plan_rows)
+    pages_per_block = 256  # Common assumption for tuple density per page
+    
+    # Assume the Bitmap Index Scan gives us an estimate of the pages it would touch
+    pages_fetched = max(1, actual_rows / 256)  # Simplistic assumption for demonstration
+    
+    cost_per_page = seq_page_cost  # Assuming most pages fetched are sequential due to bitmap nature
+    io_cost = pages_fetched * cost_per_page
+
+    # Adjust CPU costs for rechecking tuples; assume 50% need rechecking
+    recheck_ratio = 0.5
+    cpu_cost = (cpu_tuple_cost * actual_rows) + (cpu_tuple_cost * actual_rows * recheck_ratio)
+
+    startup_cost = node.get("Startup Cost", 0)  # Starting point from index scan
+    total_cost = startup_cost + io_cost + cpu_cost
+
+    explanation = f"Bitmap Heap Scan Cost Estimation:\n" \
+                  f"Relation Name: {node.get('Relation Name', 'unknown')}\n" \
+                  f"Pages Fetched: {pages_fetched}\n" \
+                  f"Estimated Rows: {plan_rows}, Actual Rows Fetched: {actual_rows}\n" \
+                  f"Cost per Page: {cost_per_page:.2f}\n" \
+                  f"Total I/O Cost: {io_cost:.2f}\n" \
+                  f"CPU Cost for Tuples: {cpu_cost:.2f}\n" \
+                  f"Total Cost: {total_cost:.2f}\n" \
+                  f"Reported Startup Cost: {startup_cost:.2f}\n" \
+                  f"Reported Total Cost: {total_cost:.2f}"
+
+    return total_cost, explanation
+    # cpu_tuple_cost = float(cache.get_setting("cpu_tuple_cost"))
+    # seq_page_cost = float(cache.get_setting("seq_page_cost"))
+    # random_page_cost = float(cache.get_setting("random_page_cost"))
+    
+    # # Extract relevant data from the bitmap index scan node
+    # plan_rows = node.get("Plan Rows", 0)
+    # actual_rows = node.get("Actual Rows", plan_rows)
+    # pages_per_block = 256  # Common assumption for tuple density per page
+
+    # # Assume at least one page is touched, typical for bitmap scans with low selectivity
+    # pages_fetched = max(1, actual_rows / pages_per_block)
+
+    # # Calculate cost per page fetched
+    # total_pages = node.get("Total Pages", 1000)  # Default total pages in the relation
+    # if pages_fetched >= 2.0:
+    #     cost_per_page = random_page_cost - (random_page_cost - seq_page_cost) * (pages_fetched / total_pages) ** 0.5
+    # else:
+    #     cost_per_page = random_page_cost
+
+    # # Calculate I/O cost
+    # io_cost = pages_fetched * cost_per_page
+
+    # # CPU cost calculations
+    # cpu_cost_per_tuple = cpu_tuple_cost
+    # cpu_cost = actual_rows * cpu_cost_per_tuple
+
+    # # Add the Bitmap Index Scan cost to the startup cost
+    # startup_cost = node["Startup Cost"]
+
+    # # Total cost calculations
+    # total_cost = startup_cost + io_cost + cpu_cost
+
+    # # Prepare the explanation
+    # explanation = f"Bitmap Heap Scan Cost Estimation:\n" \
+    #               f"Relation Name: {node.get('Relation Name', 'unknown')}\n" \
+    #               f"Pages Fetched: {pages_fetched}\n" \
+    #               f"Estimated Rows: {plan_rows}, Actual Rows Fetched: {actual_rows}\n" \
+    #               f"Cost per Page: {cost_per_page:.2f}\n" \
+    #               f"Total I/O Cost: {io_cost:.2f}\n" \
+    #               f"CPU Cost for Tuples: {cpu_cost:.2f}\n" \
+    #               f"Total Cost: {total_cost:.2f}\n" \
+    #               f"Reported Startup Cost: {startup_cost:.2f}\n" \
+    #               f"Reported Total Cost: {total_cost:.2f}"
+
+    # return total_cost, explanation
+
+    # # Assume we have fetched settings for costs and page sizes
+    # cpu_tuple_cost = float(cache.get_setting("cpu_tuple_cost"))
+    # seq_page_cost = float(cache.get_setting("seq_page_cost"))  # Example: 1.0
+    # random_page_cost = float(cache.get_setting("random_page_cost"))  # Example: 4.0
+
+    # # Assuming the node dictionary includes necessary details
+    # pages = node.get("Total Pages", 1000)  # Total pages in the relation
+    # pages_fetched = node.get("Pages Fetched", 100)  # Estimated pages fetched by bitmap
+    # tuples_fetched = node.get("Tuples Fetched", 10000)  # Estimated tuples fetched
+    
+    # # Calculate the interpolated cost per page fetched
+    # if pages_fetched >= 2.0:
+    #     cost_per_page = random_page_cost - (random_page_cost - seq_page_cost) * (pages_fetched / pages) ** 0.5
+    # else:
+    #     cost_per_page = random_page_cost
+
+    # # Costs initialization
+    # startup_cost = 0
+    # run_cost = pages_fetched * cost_per_page
+
+    # # CPU cost per tuple fetched
+    # cpu_per_tuple = cpu_tuple_cost  # Adjust as needed
+    # cpu_run_cost = cpu_per_tuple * tuples_fetched
+
+    # # Total cost calculations
+    # total_startup_cost = startup_cost  # Add specific startup operations cost if needed
+    # total_run_cost = run_cost + cpu_run_cost
+    # total_cost = total_startup_cost + total_run_cost
+
+    # explanation = f"Bitmap Heap Scan Cost Estimation:\n" \
+    #               f"Total Pages in Relation: {pages}, Pages Fetched: {pages_fetched}\n" \
+    #               f"Tuples Fetched: {tuples_fetched}\n" \
+    #               f"Startup Cost: {total_startup_cost}\n" \
+    #               f"Run Cost: {total_run_cost}\n" \
+    #               f"Total Cost: {total_cost}\n"
+
+    # return total_cost, explanation
+
 fn_dict = {
     "Nested Loop": explain_nestedlooplect,
     "Merge Join": None,
@@ -992,7 +1152,7 @@ fn_dict = {
     "Index Scan": explain_indexscan,
     "Index Only Scan": None,
     "Bitmap Index Scan": None,
-    "Bitmap Heap Scan": None,
+    "Bitmap Heap Scan": explain_bitmap_heap_scan,
     "Incremental Sort": None,
     "Aggregate": explain_aggregate,
     "WindowAgg": explain_windowagg,
