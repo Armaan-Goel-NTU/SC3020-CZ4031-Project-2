@@ -665,6 +665,151 @@ def explain_nestedlooplect(node: dict) -> str:
     explanation += f"- The run cost will be the seq_page_cost({seq_page_cost}) of accessing all the blocks"
     return startup_cost + run_cost, explanation
 
+def find_relation_name(plan):
+    # Check if the current node directly has a 'Relation Name'
+    if 'Relation Name' in plan:
+        return plan['Relation Name']
+    
+    # If there are sub-plans, recursively search them
+    if 'Plans' in plan:
+        for subplan in plan['Plans']:
+            relation_name = find_relation_name(subplan)
+            if relation_name:
+                return relation_name
+    
+    return None 
+
+def explain_nestedloop_new(node: dict) -> str:
+    cpu_tuple_cost = float(cache.get_setting("cpu_tuple_cost"))
+    # Extracting costs and rows from the node dictionary
+    outer_plan = node['Plans'][0]
+    inner_plan = node['Plans'][1]
+    
+    outer_startup_cost = outer_plan['Startup Cost']
+    outer_total_cost = outer_plan['Total Cost']
+    outer_rows = outer_plan['Plan Rows']
+    
+    inner_startup_cost = inner_plan['Startup Cost'] #inner_rescan_startup_cost
+    inner_total_cost = inner_plan['Total Cost'] #inner_rescan_total_cost
+    inner_rows = inner_plan['Plan Rows']
+    
+    outer_relation = find_relation_name(outer_plan)
+    inner_relation = find_relation_name(inner_plan)
+    
+    actual_outer_rows = cache.get_tuple_count(outer_relation)
+    actual_inner_rows = cache.get_tuple_count(inner_relation)
+    #Protect some assumptions below that rowcounts aren't zero 
+    if (outer_rows <= 0):
+        outer_rows = 1
+    
+    if (inner_rows <= 0):
+        inner_rows = 1
+    startup_cost =0
+    run_cost=0
+    # Basic calculations for startup and run costs
+    startup_cost += outer_startup_cost + inner_startup_cost
+    #run_cost = (outer_total_cost - outer_startup_cost) + (inner_total_cost - inner_startup_cost) * outer_rows
+    run_cost += (outer_total_cost - outer_startup_cost)
+
+    if (outer_rows>1):
+        run_cost+=(outer_rows-1)*inner_startup_cost   #inner_rescan_start_cost
+    
+    inner_run_cost = inner_total_cost-inner_startup_cost
+    inner_rescan_run_cost= inner_total_cost - inner_startup_cost
+
+    relation_name = find_relation_name(node)  
+    
+    actual_rows = cache.get_tuple_count(relation_name)
+   
+
+    # Adjustments based on join type
+    if node['Join Type'] in ['Inner']:
+            cpu_tuple_cost = float(cache.get_setting("cpu_tuple_cost"))
+
+            # Extracting necessary components from the node
+            outer_plan = node['Plans'][0]
+            inner_plan = node['Plans'][1]
+            
+            outer_startup_cost = outer_plan['Startup Cost']
+            outer_total_cost = outer_plan['Total Cost']
+            outer_rows = outer_plan['Plan Rows']
+            
+            inner_startup_cost = inner_plan['Startup Cost']
+            inner_total_cost = inner_plan['Total Cost']
+            inner_rows = inner_plan['Plan Rows']
+
+            startup_cost = outer_startup_cost + inner_startup_cost
+            run_cost = outer_total_cost - outer_startup_cost 
+
+            if outer_rows > 1:
+                run_cost += (outer_rows - 1) * inner_startup_cost
+
+            inner_run_cost = inner_total_cost - inner_startup_cost
+
+            run_cost += outer_rows * inner_run_cost
+
+            total_cost = startup_cost + run_cost
+
+            explanation = (
+                f"Nested Loop Join (Inner Join) Explanation:\n"
+                f"- Outer Plan: {outer_plan['Node Type']} with {outer_rows} rows\n"
+                f"- Inner Plan: {inner_plan['Node Type']} with {inner_rows} rows\n"
+                f"- Startup Cost: Outer = {outer_startup_cost:.2f}, Inner = {inner_startup_cost:.2f}, Total = {startup_cost:.2f}\n"
+                f"- Run Cost: Outer Total = {outer_total_cost:.2f}, Inner per Row = {inner_run_cost:.2f}, Total Run = {run_cost:.2f}\n"
+                f"- Total Cost: {total_cost:.2f}\n"
+            )
+
+            return total_cost, explanation
+
+
+    if node['Join Type'] in ['Semi', 'Anti']:
+        # Assuming early exit after the first match
+        outer_match_frac = min(1, actual_rows / actual_outer_rows if actual_outer_rows > 0 else 1)
+        match_count = actual_rows / outer_rows if outer_rows > 0 else 0
+        
+        outer_matched_rows=outer_rows*outer_match_frac
+        outer_unmatched_rows= outer_rows - outer_matched_rows
+        inner_scan_frac = 2.0 / (match_count + 1.0)
+
+        ntuples = outer_matched_rows * inner_rows * inner_scan_frac
+
+    # Calculate the number of tuples processed (not necessarily resulting in output)
+        ntuples = outer_matched_rows * inner_rows * inner_scan_frac
+        #run_cost+= inner_run_cost * inner_scan_frac
+        #run_cost = (outer_total_cost - outer_startup_cost) + inner_startup_cost * outer_rows #final loop
+        
+        #if no index join quals
+        ntuples += outer_unmatched_rows * inner_rows
+        run_cost += inner_run_cost
+        if (outer_unmatched_rows >= 1):
+            outer_unmatched_rows -= 1
+        else:
+            outer_matched_rows -= 1
+        if (outer_matched_rows > 0):
+            run_cost += outer_matched_rows * inner_rescan_run_cost * inner_scan_frac
+        if(outer_unmatched_rows > 0):
+            run_cost += outer_unmatched_rows * inner_rescan_run_cost
+
+    #normal case:
+    else:
+        run_cost+=inner_run_cost
+        if (outer_rows >1):
+            run_cost+=(outer_rows-1)*inner_rescan_run_cost
+        ntuples = outer_rows * inner_rows
+        run_cost +=  cpu_tuple_cost* ntuples
+    
+    total_cost = startup_cost + run_cost
+    
+    # Explanation assembly
+    explanation = f"Nested Loop Join Explanation:\n" \
+                  f"- Outer Rows: {outer_rows}, Inner Rows: {inner_rows}\n" \
+                  f"- Startup Costs: Outer = {outer_startup_cost}, Inner = {inner_startup_cost}, Total = {startup_cost}\n" \
+                  f"- Run Costs: Outer Run Cost = {outer_total_cost - outer_startup_cost}\n " \
+                  f"-Inner Run Cost per Outer Row = {inner_total_cost - inner_startup_cost}\n " \
+                  f"-Total Run Cost = {run_cost}\n" \
+                  f"- Total Cost: {total_cost}\n"
+
+    return total_cost, explanation
 
 def explain_hash_join(node: dict) -> str:
     # Configuration settings
