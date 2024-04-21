@@ -77,6 +77,7 @@ def explain_seqscan(node: dict) -> str:
         filter_cost = filters * cpu_operator_cost
         explanation += f"CPU cost per tuple is increased by {filter_cost:.4f} for {filters} filters * cpu_operator_cost ({cpu_operator_cost})\n"
 
+    cpu_cost = (cpu_tuple_cost + filter_cost) * row_count
     if node["Parallel Aware"] and "Workers Planned" in node:
         workers = node["Workers Planned"]
         if cache.get_setting("parallel_leader_participation") == "on" and workers < 4:
@@ -84,7 +85,7 @@ def explain_seqscan(node: dict) -> str:
         explanation += f"The total CPU cost is reduced by a parallelization factor of {workers:.1f}\n" 
 
     disk_cost = seq_page_cost * page_count
-    cost = truncate_cost((cpu_tuple_cost + filter_cost)/workers * row_count + disk_cost)
+    cost = truncate_cost(cpu_cost / workers + disk_cost)
     expected_cost = node["Total Cost"]
     if cost != expected_cost:
         expected_cost -= disk_cost
@@ -508,31 +509,32 @@ def explain_aggregate(node: dict) -> str: #not done, no of workers not accounted
         explanation += f"The startup cost is the total cost of the child node.\n"
         explanation += f"cpu_tuple_cost ({cpu_tuple_cost} is added to the the total cost.\n"
         return (total_cost + cpu_tuple_cost, explanation)
-    elif strategy == "Sorted" or strategy == "Mixed":
-        numGroupCols = len(clean_output(node["Output"]))
-        total_cost += cpu_operator_cost * numGroupCols * child_tuples
-        total_cost += cpu_tuple_cost * node["Plan Rows"]
+
+    numGroupCols = len(node["Group Key"]) if "Group Key" in node else len(clean_output(node["Output"]))
+    total_cost += cpu_operator_cost * numGroupCols * child_tuples
+    total_cost += cpu_tuple_cost * node["Plan Rows"]
+
+    total_cost += cpu_operator_cost * child_tuples
+    total_cost += cpu_operator_cost * node["Plan Rows"]
+    
+    comment = ""
+
+    if strategy == "Sorted" or strategy == "Mixed":
         explanation = f"When sorting, no additional startup cost is incurred.\n"
         explanation += f"cpu_operator_cost ({cpu_operator_cost}) * length of grouping keys ({numGroupCols}) is charged for each input tuple\n"
-        explanation += f"cpu_tuple_cost ({cpu_tuple_cost}) is charged for each output tuple"
-        
-        if strategy == "Sorted":
-            return (total_cost, explanation)
+        explanation += f"cpu_tuple_cost ({cpu_tuple_cost}) is charged for each output tuple.\n"
+        explanation += f"cpu_operator_cost also charged to each input and output tuple as aggregation cost."
     else:
-        total_cost += cpu_operator_cost * numGroupCols * child_tuples
-        total_cost += cpu_tuple_cost * node["Plan Rows"]
         explanation = f"When hashing, cpu_operator_cost ({cpu_operator_cost}) * length of grouping keys ({numGroupCols}) is charged for each input tuple during startup. This represents the cost of the hash computation.\n"
-        explanation += f"cpu_tuple_cost ({cpu_tuple_cost}) is charged for each output tuple"
+        explanation += f"cpu_tuple_cost ({cpu_tuple_cost}) is charged for each output tuple\n"
+        explanation += f"cpu_operator_cost also charged to each input and output tuple as aggregation cost."
 
-    child = node["Plans"][0]
-    tuples = node["Plan Rows"]
-    startup_cost = child["Total Cost"] + (cpu_operator_cost * child["Plan Rows"])
-    explanation = f"The Aggregate's startup cost consists of cost of child operator and \
-    the cpu_operator_cost ({cpu_operator_cost}) multipled by number of input rows\n"
-    explanation += f"The Aggregate's total cost is then increased by cpu_tuple_cost ({cpu_tuple_cost}), \
-    for processing every resulting output row"
-    total_cost = startup_cost + cpu_tuple_cost * tuples
-    return (total_cost, explanation)
+    expected_cost = node["Total Cost"]
+    if truncate_cost(total_cost) != expected_cost:
+        comment = "The assumption of 1 cpu_operator_cost to each input & output tuple is likely to be an underestimate.\n"
+        comment += "We do not know the amount and costs of the aggregation functions used."
+
+    return (total_cost, explanation, comment)
 
 def explain_nestedloop(node: dict) -> str: #total cost is wrong
     cpu_operator_cost = float(cache.get_setting("cpu_operator_cost"))
@@ -575,8 +577,8 @@ def get_m():
 
 def explain_nestedlooplect(node: dict) -> str: #total cost is wrong
     seq_page_cost = float(cache.get_setting("seq_page_cost"))
-    outer_path = node["Plans"][0]
-    inner_path = node["Plans"][1]
+    outer_path = [child for child in node["Plans"] if child["Parent Relationship"] == "Outer"][0]
+    inner_path = [child for child in node["Plans"] if child["Parent Relationship"] == "Inner"][0]
     outer_path_rows = outer_path["Plan Rows"]
     inner_path_rows = inner_path["Plan Rows"]
     inputbuffers = get_m()
@@ -590,8 +592,8 @@ def explain_nestedlooplect(node: dict) -> str: #total cost is wrong
     startup_cost += outer_path["Startup Cost"] + inner_path["Startup Cost"]
 
     # Calculate the run cost of the inner relation excluding startup cost
-    outer_blocks = outer_path_rows * outer_path["Plan Width"] / cpu_block_size
-    inner_blocks = inner_path_rows * inner_path["Plan Width"] / cpu_block_size
+    outer_blocks = math.ceil(outer_path_rows * outer_path["Plan Width"] / cpu_block_size)
+    inner_blocks = math.ceil(inner_path_rows * inner_path["Plan Width"] / cpu_block_size)
     blocks_accessed = outer_blocks + ((outer_blocks * inner_blocks) / (inputbuffers - 1))
     run_cost += blocks_accessed * seq_page_cost
 
@@ -935,7 +937,7 @@ fn_dict = {
     "Bitmap Index Scan": None,
     "Bitmap Heap Scan": None,
     "Incremental Sort": None,
-    "Aggregate": None,
+    "Aggregate": explain_aggregate,
     "WindowAgg": explain_windowagg,
 
     "Result": explain_result,
