@@ -1,5 +1,6 @@
 # SC3020-CZ4031-Project-2
 Project 2 Query Execution Plan Cost Explainer
+> Listed amongst the Top 3 groups for this project. 
 
 ## Installation Prerequesites
 - All cost mappings are for `PostgreSQL 16.2`.
